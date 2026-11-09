@@ -1,0 +1,7 @@
+*.exe
+*.pdb
+*.ilk
+out.mp4
+imgui.ini
+keybindings.ini
+keybindings.ini.old

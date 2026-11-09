@@ -1,0 +1,24 @@
+diff --git a/imgui_impl_opengl3/imgui_impl_opengl3.odin b/imgui_impl_opengl3/imgui_impl_opengl3.odin
+index b78e911..18206df 100644
+--- a/imgui_impl_opengl3/imgui_impl_opengl3.odin
++++ b/imgui_impl_opengl3/imgui_impl_opengl3.odin
+@@ -32,13 +32,12 @@ foreign lib {
+ // [BETA] Selected render state data shared with callbacks.
+ // This is temporarily stored in GetPlatformIO().Renderer_RenderState during the ImGui_ImplOpenGL3_RenderDrawData() call.
+ // (Please open an issue if you feel you need access to more data)
+-struct RenderState
+-{
+-    UseBindSampler: bool;
+-    UseTexParameterFilter: bool;
+-    CurrentSampler: u32;                 // (GLuint) Used if UseBindSampler == true (and are available), otherwise always 0
+-    CurrentTexParameterFilter: u32;      // (GLuint) Used if UseTexParameterFilter == true
+-};
++RenderState :: struct {
++	UseBindSampler:            bool,
++	UseTexParameterFilter:     bool,
++	CurrentSampler:            u32, // (GLuint) Used if UseBindSampler == true (and are available), otherwise always 0
++	CurrentTexParameterFilter: u32, // (GLuint) Used if UseTexParameterFilter == true
++}
+ 
+ @(link_prefix="ImGui_ImplOpenGL3_")
+ foreign lib {
