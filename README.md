@@ -11,9 +11,11 @@ A small video editor for personal music videos. It cuts video clips to the beat 
 - Detect the bpm of a song. If the result is wrong, pick another candidate or tap the tempo.
 - Show a beat grid. Cuts and clips snap to the grid.
 - Make patterns. A pattern is a loop of hits on the beat grid, like a drum machine. Each hit makes a cut.
+- Make parts. A part is a time range with its own pattern.
 - Show one video layer at a time. The program row shows which layer is visible.
 - Select a range in the program row. Copy it, paste it, repeat it, or loop it.
-- Randomize the layers. Or rearrange the clips with clip shuffle and time shuffle.
+- Randomize. It fills each slice of the rhythm with footage from your clips, on a new layer. The footage is the same time, in order, or any piece.
+- Set the background color. Set the transform of one slice or of all slices of a clip.
 - Edit on many layers. Lock, hide, mute, or solo a layer.
 - Play with sound. See the waveform and the level meters.
 - Export with ffmpeg to mp4, mkv, webm, or mov.
@@ -28,10 +30,10 @@ A small video editor for personal music videos. It cuts video clips to the beat 
 5. If the grid is not on the beat, move the playhead to a beat. Press **Beat at playhead** (`shift+h`).
 6. Open **Patterns** (`shift+p`). Press **New**. Click the steps to make hits.
 7. Set each lane to a layer (V1, V2, ...) or to `mark`. A `mark` only makes a cut.
-8. Press **Apply pattern** (`p`).
+8. Press **Apply pattern** (`p`). To use other patterns in other places, drag in the **Parts** row to make parts. Right-click a part to set its pattern.
 9. Select a range in the program row. Press `ctrl+c` to copy, `ctrl+v` to paste, or `ctrl+r` to repeat it. Press `ctrl+l` to loop the playback.
 10. Open **Randomize options** (`shift+r`). Set the options. Press **Randomize** (`r`).
-    - A `mark` gets a random layer.
+    - It slices at the cuts, the pattern, or the grid. It fills each slice with footage on a new layer.
     - A lane with a layer keeps its layer.
 11. Press `space` to play. Press `ctrl+z` to undo a change.
 12. Press **Export** (`ctrl+e`).

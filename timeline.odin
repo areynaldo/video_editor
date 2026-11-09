@@ -3,13 +3,16 @@ package main
 import "core:fmt"
 import "core:math"
 import "core:path/filepath"
+import "core:slice"
 
 import im "deps/odin-imgui"
 
 TRACK_H :: 40
 RULER_H :: 20
-PROG_H :: 26 // the program lane under the ruler
-LANES_Y :: RULER_H + PROG_H
+PART_H :: 16 // the parts row under the ruler
+PROG_Y :: RULER_H + PART_H
+PROG_H :: 26 // the program lane under the parts row
+LANES_Y :: PROG_Y + PROG_H
 EDGE_PX :: 6 // grab zone for trimming
 HEADER_W :: 124 // track header column, stays at the left while scrolling
 
@@ -30,6 +33,7 @@ Drag :: enum {
 	Trim_Right,
 	Cut_Move, // dragging a program cut
 	Prog_Range, // dragging over program segments to select a range
+	Part_Create, // dragging out a part in the parts row
 	Pan, // hand tool
 }
 
@@ -40,12 +44,37 @@ sel_cut2 := -1 // last selected program segment (>= sel_cut)
 drag_seg: int // the segment a range selection started at
 loop_playback: bool // loop the selected program range while playing
 
+sel_part := -1 // selected part
+part_drag_t: f64 // the free end of a part being dragged out
+
 select_cuts :: proc(a, b: int) {
 	sel_cut, sel_cut2 = min(a, b), max(a, b)
+	sel_part = -1
 }
 
 clear_cut_sel :: proc() {
 	sel_cut, sel_cut2 = -1, -1
+	sel_part = -1
+}
+
+// The part that contains time t, or -1.
+part_at :: proc(t: f64) -> int {
+	for part, i in project.parts {
+		if t >= part.t0 && t < part.t1 {return i}
+	}
+	return -1
+}
+
+// Adds a part over a..b with the current pattern; parts it overlaps are replaced.
+make_part :: proc(a, b: f64) {
+	if b - a < 1e-3 {return}
+	#reverse for part, i in project.parts {
+		if part.t0 < b && part.t1 > a {ordered_remove(&project.parts, i)}
+	}
+	pattern := len(project.patterns) > 0 ? project.settings.pattern_sel : -1
+	append(&project.parts, Part{a, b, pattern})
+	slice.sort_by(project.parts[:], proc(x, y: Part) -> bool {return x.t0 < y.t0})
+	sel_part = part_at((a + b) / 2)
 }
 
 // The selected program range: from the first selected segment's start to the last one's end.
@@ -262,7 +291,7 @@ timeline :: proc() {
 		case .Zoom:  im.SetMouseCursor(.ResizeAll)
 		}
 	}
-	if canvas_hovered && mouse.y > p0.y + RULER_H && mouse.y < p0.y + LANES_Y && cut_near(p0.x, mouse.x) >= 0 {
+	if canvas_hovered && mouse.y > p0.y + PROG_Y && mouse.y < p0.y + LANES_Y && cut_near(p0.x, mouse.x) >= 0 {
 		im.SetMouseCursor(.ResizeEW)
 	}
 
@@ -281,6 +310,14 @@ timeline :: proc() {
 	if im.IsItemClicked(.Right) && !in_header {
 		switch {
 		case mouse.y < p0.y + RULER_H:
+		case mouse.y < p0.y + PROG_Y: // parts row
+			if hit := part_at(t_mouse); hit >= 0 {
+				clear_selection(&project)
+				clear_track_selection(&project)
+				clear_cut_sel()
+				sel_part = hit
+				open_context(.Part, t_mouse, -1)
+			}
 		case mouse.y < p0.y + LANES_Y:
 			if seg := segment_at(project, t_mouse); seg >= 0 {
 				clear_selection(&project)
@@ -313,6 +350,17 @@ timeline :: proc() {
 		switch {
 		case mouse.y < p0.y + RULER_H:
 			drag = .Scrub
+		case mouse.y < p0.y + PROG_Y:
+			// parts row: click a part to select it, drag on empty space to make one
+			clear_selection(&project)
+			clear_track_selection(&project)
+			clear_cut_sel()
+			if hit := part_at(t_mouse); hit >= 0 {
+				sel_part = hit
+				drag = .None
+			} else {
+				drag, drag_ref, part_drag_t = .Part_Create, snap(max(0, t_mouse)), snap(max(0, t_mouse))
+			}
 		case mouse.y < p0.y + LANES_Y:
 			// program lane: grab a cut to resize its segments, or select a segment
 			clear_selection(&project)
@@ -382,6 +430,9 @@ timeline :: proc() {
 	// Drag
 	if drag != .None {
 		if !im.IsMouseDown(.Left) {
+			if drag == .Part_Create {
+				make_part(min(drag_ref, part_drag_t), max(drag_ref, part_drag_t))
+			}
 			drag = .None
 		} else {
 			// where the grabbed edge / clip start wants to be (grid-snapped unless alt is held)
@@ -402,6 +453,8 @@ timeline :: proc() {
 				playhead = snap(max(0, t_mouse))
 				checkpoint = playhead
 				playing = false
+			case .Part_Create:
+				part_drag_t = snap(max(0, t_mouse))
 			case .Prog_Range:
 				select_cuts(drag_seg, max(segment_at(project, t_mouse), 0))
 			case .Cut_Move:
@@ -493,7 +546,27 @@ timeline :: proc() {
 
 	// Program lane: which video layer is shown when
 	{
-		y0 := p0.y + RULER_H
+		// parts row: ranges with their own pattern
+		py := p0.y + RULER_H
+		im.DrawList_AddRectFilled(dl, {p0.x, py}, {p0.x + size.x, py + PART_H - 1}, 0xFF1B1B1B)
+		for part, i in project.parts {
+			a := im.Vec2{time_to_x(p0.x, part.t0), py + 1}
+			b := im.Vec2{time_to_x(p0.x, part.t1), py + PART_H - 2}
+			r, g, bl: f32
+			im.ColorConvertHSVtoRGB(part.pattern >= 0 ? math.mod(f32(part.pattern) * 0.27 + 0.1, 1) : 0, part.pattern >= 0 ? 0.5 : 0, 0.55, &r, &g, &bl)
+			im.DrawList_AddRectFilled(dl, a, b, im.ColorConvertFloat4ToU32({r, g, bl, 1}))
+			im.DrawList_AddRect(dl, a, b, i == sel_part ? 0xFFFFFFFF : 0xFF000000)
+			name := part.pattern >= 0 && int(part.pattern) < len(project.patterns) ? get_fixed(project.patterns[part.pattern].name[:]) : "no pattern"
+			im.DrawList_PushClipRect(dl, a, b, true)
+			im.DrawList_AddText(dl, {a.x + 4, a.y}, 0xFFFFFFFF, cstr(name))
+			im.DrawList_PopClipRect(dl)
+		}
+		if drag == .Part_Create { // the part being dragged out
+			x0, x1 := time_to_x(p0.x, min(drag_ref, part_drag_t)), time_to_x(p0.x, max(drag_ref, part_drag_t))
+			im.DrawList_AddRect(dl, {x0, py + 1}, {x1, py + PART_H - 2}, 0xFFFFFFFF)
+		}
+
+		y0 := p0.y + PROG_Y
 		im.DrawList_AddRectFilled(dl, {p0.x, y0}, {p0.x + size.x, y0 + PROG_H - 1}, 0xFF161616)
 		end := project_length(project)
 		for cut, i in project.program {
@@ -578,7 +651,8 @@ draw_track_headers :: proc(dl: ^im.DrawList, p0: im.Vec2, sx, height: f32, rows:
 	hr := hl + HEADER_W
 	im.DrawList_AddRectFilled(dl, {hl, p0.y}, {hr, p0.y + height}, 0xFF1B1B1B)
 	im.DrawList_AddText(dl, {hl + 8, p0.y + 3}, 0xFFFFFFFF, cstr(fmt.tprintf("%d fps", project.settings.fps)))
-	im.DrawList_AddText(dl, {hl + 8, p0.y + RULER_H + 5}, 0xFFFFFFFF, "Program")
+	im.DrawList_AddText(dl, {hl + 8, p0.y + RULER_H + 1}, 0xFFB0B0B0, "Parts")
+	im.DrawList_AddText(dl, {hl + 8, p0.y + PROG_Y + 5}, 0xFFFFFFFF, "Program")
 
 	mouse := im.GetMousePos()
 	click := im.IsWindowHovered() && im.IsMouseClicked(.Left)

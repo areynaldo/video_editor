@@ -112,6 +112,43 @@ pattern_hits :: proc(p: Project, pat: Pattern, t0, t1: f64) -> []Hit {
 	return out[:]
 }
 
+// Slicing times for Randomize from a pattern's hits in [t0, t1): the hit times, and per
+// slot the layer (track) of the hit's lane if it has one, else PIN_NONE.
+pattern_slots :: proc(p: Project, pat: Pattern, t0, t1: f64, times: ^[dynamic]f64, pins: ^[dynamic]int) {
+	layers := video_layers(p)
+	for h in pattern_hits(p, pat, t0, t1) {
+		target := pat.lanes[h.lane].target
+		append(times, h.time)
+		append(pins, target > 0 && int(target) <= len(layers) ? layers[target - 1] : PIN_NONE)
+	}
+}
+
+// The same for every part (each with its own pattern) inside [t0, t1). The gaps
+// between parts become PIN_SKIP slots.
+parts_slots :: proc(p: Project, t0, t1: f64, times: ^[dynamic]f64, pins: ^[dynamic]int) {
+	for part in p.parts {
+		if part.pattern < 0 || int(part.pattern) >= len(p.patterns) || part.t1 <= t0 || part.t0 >= t1 {continue}
+		a, b := max(part.t0, t0), min(part.t1, t1)
+		n := len(times)
+		pattern_slots(p, p.patterns[part.pattern], a, b, times, pins)
+		if len(times) > n {
+			append(times, b)
+			append(pins, PIN_SKIP)
+		}
+	}
+}
+
+// Applies the pattern of every part inside its own range. Returns how many parts.
+apply_parts :: proc() -> (n: int) {
+	for part in project.parts {
+		if part.pattern >= 0 && int(part.pattern) < len(project.patterns) {
+			program_apply_pattern(&project, project.patterns[part.pattern], part.t0, part.t1, true)
+			n += 1
+		}
+	}
+	return
+}
+
 // Cuts the program at every hit of the pattern inside [t0, t1) and sets the layers
 // the lanes target. replace: the cuts already in the range are removed first.
 program_apply_pattern :: proc(p: ^Project, pat: Pattern, t0, t1: f64, replace: bool) {
@@ -162,6 +199,13 @@ cur_pattern :: proc() -> ^Pattern {
 apply_pattern :: proc(idx := -1) {
 	if idx >= 0 && idx < len(project.patterns) {
 		project.settings.pattern_sel = i32(idx)
+	}
+	_, _, ranged := program_range()
+	if idx < 0 && !ranged && len(project.parts) > 0 { // parts: each gets its own pattern
+		n := apply_parts()
+		clear_cut_sel()
+		set_status("applied the patterns of %d parts", n)
+		return
 	}
 	pat := cur_pattern()
 	if pat == nil {
@@ -219,7 +263,11 @@ panel_patterns :: proc() {
 		}
 		im.SameLine()
 		if im.Button("Delete") {
-			ordered_remove(&project.patterns, int(project.settings.pattern_sel))
+			gone := project.settings.pattern_sel
+			ordered_remove(&project.patterns, int(gone))
+			for &part in project.parts { // parts keep pointing at the right pattern
+				if part.pattern == gone {part.pattern = -1} else if part.pattern > gone {part.pattern -= 1}
+			}
 			pat = cur_pattern()
 		}
 	}

@@ -122,8 +122,11 @@ do_action :: proc(a: Action) {
 		if drag == .None {redo()}
 	case .Duplicate:
 		if any_selected() {duplicate_selected(&project)} else {duplicate_selected_tracks(&project)}
-	case .Delete: // a program cut, else clips, else layers
+	case .Delete: // a part, a program cut, else clips, else layers
 		switch {
+		case sel_part >= 0 && sel_part < len(project.parts):
+			ordered_remove(&project.parts, sel_part)
+			sel_part = -1
 		case sel_cut >= 0: // the selected program segments: their cuts go, so they merge into the one before
 			for i := min(sel_cut2, len(project.program) - 1); i >= sel_cut; i -= 1 {
 				cut_remove(&project, i)
@@ -245,100 +248,90 @@ do_action :: proc(a: Action) {
 	}
 }
 
-// Randomize. Slicing comes from Rand_Options.slice (the program's cuts, a pattern, the
-// grid). Without a shuffle ticked it deals layers to the cuts (a pattern lane that
-// has a layer keeps it); with clip / time shuffle it rearranges footage onto the
-// slots of that rhythm on a new layer (see rearrange.odin).
+// Randomize: fill the slots of a rhythm with slices of footage on a new layer (see
+// rearrange.odin). The slicing comes from Rand_Options.slice: the program's cuts, the
+// pattern (each part's own pattern if the project has parts), or the grid. A selected
+// program range limits it to that range.
 run_randomize :: proc() {
 	s := project.settings
 	step, _ := grid_step(s)
-	job := Rand_Job {
-		opts    = s.rand,
-		end     = project_length(project),
-		spacing = step * f64(max(s.cut_every, 1)),
-		origin  = grid_origin(s),
-	}
-	slice_by := s.rand.slice
-	pat: ^Pattern
-	if slice_by == .Pattern {
-		if i := int(s.rand.pattern); i >= 0 && i < len(project.patterns) {
-			pat = &project.patterns[i]
-		} else {
-			pat = cur_pattern()
-		}
-		if pat == nil {
-			set_status("no pattern yet: using the grid")
-			slice_by = .Grid
-		}
-	}
-
-	if .Time_Shuffle in s.rand.modes || .Clip_Shuffle in s.rand.modes {
-		cands := rearrange_candidates(project)
-		lo, hi := candidate_span(project, cands)
-		if len(cands) == 0 {
-			set_status("no video clips to rearrange")
-			return
-		}
-		total := 0.0
-		for ci in cands {total += project.clips[ci].duration}
-		// the slicing times; with "use all" they run on (the rhythm loops) until the footage would be used up
-		horizon := .Use_All in s.rand.modes ? lo + (hi - lo) + total : hi
-		times := make([dynamic]f64, context.temp_allocator)
-		switch slice_by {
-		case .Pattern:
-			for h in pattern_hits(project, pat^, lo, horizon) {append(&times, h.time)}
-		case .Cuts:
-			for c in project.program {
-				if c.time >= lo - CUT_EPS && c.time <= hi + CUT_EPS {append(&times, c.time)}
-			}
-			if n := len(times); n >= 2 {
-				period := times[n - 1] - times[0]
-				use_all := .Use_All in s.rand.modes
-				for k := 1; use_all && times[0] + f64(k) * period < horizon; k += 1 { // loop the cuts
-					for i in 1 ..< n {append(&times, times[i] + f64(k) * period)}
-				}
-			}
-		case .Grid:
-		}
-		if len(times) < 2 { // no rhythm to use: the grid
-			clear(&times)
-			for k := int(math.ceil((lo - job.origin) / job.spacing - 1e-6)); job.origin + f64(k) * job.spacing <= horizon + job.spacing; k += 1 {
-				append(&times, job.origin + f64(k) * job.spacing)
-			}
-		}
-		res := rearrange(&project, s.rand, cands, times[:], lo, hi)
-		if res.cells == 0 {
-			set_status("nothing to rearrange: the clips have no piece as long as a slot")
-		} else {
-			// the old cuts described the source clips, not this layer: mark its slots instead
-			clear(&project.program)
-			for t in res.bounds {
-				cut_insert(&project, t)
-			}
-			clear_cut_sel()
-			set_status("rearranged: %d pieces into %d clips on a new layer (%d unused, %d empty slots)", res.cells, res.clips, res.unused, res.empty)
-		}
+	spacing, origin := step * f64(max(s.cut_every, 1)), grid_origin(s)
+	cands := rearrange_candidates(project)
+	if len(cands) == 0 {
+		set_status("no video clips to randomize")
 		return
 	}
+	lo, hi := candidate_span(project, cands)
+	t0, t1, ranged := program_range()
+	if ranged {lo, hi = t0, t1}
+	total := 0.0
+	for ci in cands {total += project.clips[ci].duration}
+	use_all := s.rand.use_all && s.rand.footage != .Same_Time
+	// the slicing times; with "use all" they run on (the rhythm loops) until the footage would be used up
+	horizon := use_all ? lo + (hi - lo) + total : hi
 
-	// deal layers to the cuts
-	job.t1 = job.end
-	if t0, t1, ok := program_range(); ok {
-		job.t0, job.t1 = t0, t1
+	times := make([dynamic]f64, context.temp_allocator)
+	pins := make([dynamic]int, context.temp_allocator)
+	switch s.rand.slice {
+	case .Pattern:
+		if len(project.parts) > 0 {
+			parts_slots(project, lo, horizon, &times, &pins)
+		} else {
+			pat: ^Pattern
+			if i := int(s.rand.pattern); i >= 0 && i < len(project.patterns) {
+				pat = &project.patterns[i]
+			} else {
+				pat = cur_pattern()
+			}
+			if pat != nil {pattern_slots(project, pat^, lo, horizon, &times, &pins)}
+		}
+	case .Cuts:
+		for c in project.program {
+			if c.time >= lo - CUT_EPS && c.time <= hi + CUT_EPS {
+				append(&times, c.time)
+				append(&pins, c.fixed && c.layer >= 0 ? c.layer : PIN_NONE) // a layer a pattern lane or you set stays
+			}
+		}
+		if n := len(times); n >= 2 && use_all {
+			period := times[n - 1] - times[0]
+			for k := 1; times[0] + f64(k) * period < horizon; k += 1 { // loop the cuts
+				for i in 1 ..< n {
+					append(&times, times[i] + f64(k) * period)
+					append(&pins, pins[i])
+				}
+			}
+		}
+	case .Grid:
 	}
-	if slice_by == .Pattern { // lay the pattern down first: its marks get layers, its lanes with a layer keep theirs
-		program_apply_pattern(&project, pat^, job.t0, job.t1, true)
-		slice_by = .Cuts
+	if len(times) < 2 { // no rhythm to use: the grid
+		clear(&times)
+		clear(&pins)
+		for k := int(math.ceil((lo - origin) / spacing - 1e-6)); origin + f64(k) * spacing <= horizon + spacing; k += 1 {
+			append(&times, origin + f64(k) * spacing)
+		}
 	}
-	job.opts.slice = slice_by
-	layers := make([dynamic]int, context.temp_allocator)
-	for t in selected_tracks(project) {
-		if slice.contains(video_layers(project), t) {append(&layers, t)}
+
+	res := rearrange(&project, s.rand, cands, times[:], pins[:], lo, hi)
+	if res.cells == 0 {
+		set_status("nothing to randomize: the clips do not cover a slot")
+		return
 	}
-	job.layers = layers[:]
-	program_randomize(&project, job)
+	// the old cuts described the source clips, not this layer: mark its slots instead
+	end := hi
+	if n := len(res.bounds); n > 0 {end = max(end, res.bounds[n - 1] + 2 * CUT_EPS)}
+	if ranged {
+		#reverse for c, i in project.program {
+			if c.time >= lo - CUT_EPS && c.time < end {cut_remove(&project, i)}
+		}
+	} else {
+		clear(&project.program)
+	}
+	for t in res.bounds {
+		i := cut_insert(&project, t)
+		project.program[i].layer, project.program[i].fixed = -1, false // -1: the top layer shows, and that is the new one
+	}
 	clear_cut_sel()
-	set_status("%s%s", .Random in s.rand.modes ? "randomized layers" : "sliced (tick random to assign layers)", len(layers) > 0 ? " (selected layers)" : "")
+	set_status("randomized: %d slices in %d clips on a new layer%s", res.cells, res.clips, res.empty > 0 ? fmt.tprintf(" (%d empty slots)", res.empty) : "")
 }
 
 // What the tempo detection found, in timeline terms (see detect_project_bpm).

@@ -88,7 +88,8 @@ export :: proc(p: Project, out_path: string) -> bool {
 
 	g: strings.Builder
 	strings.builder_init(&g, context.temp_allocator)
-	fmt.sbprintf(&g, "color=c=black:s=%dx%d:r=%d:d=%.3f[v0];", W, H, FPS, length)
+	bg := p.settings.bg
+	fmt.sbprintf(&g, "color=c=0x%02x%02x%02x:s=%dx%d:r=%d:d=%.3f[v0];", int(bg.r * 255 + 0.5), int(bg.g * 255 + 0.5), int(bg.b * 255 + 0.5), W, H, FPS, length)
 
 	vcount, acount: int
 	for ci in order {

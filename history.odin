@@ -15,6 +15,7 @@ Snapshot :: struct {
 	next_group:  int,
 	cuts:        []Cut,
 	flags:       []Track_Flags,
+	parts:       []Part,
 }
 
 MAX_HISTORY :: 200
@@ -23,18 +24,22 @@ undo_stack, redo_stack: [dynamic]Snapshot
 last_state: Snapshot
 
 snapshot_of :: proc(p: Project) -> Snapshot {
-	return {slice.clone(p.clips[:]), p.track_count, p.next_group, slice.clone(p.program[:]), slice.clone(p.track_flags[:])}
+	return {slice.clone(p.clips[:]), p.track_count, p.next_group, slice.clone(p.program[:]), slice.clone(p.track_flags[:]), slice.clone(p.parts[:])}
 }
 
 snapshot_free :: proc(s: Snapshot) {
 	delete(s.clips)
 	delete(s.cuts)
 	delete(s.flags)
+	delete(s.parts)
 }
 
 same_content :: proc(a, b: Snapshot) -> bool {
-	if len(a.flags) != len(b.flags) || len(a.cuts) != len(b.cuts) || len(a.clips) != len(b.clips) || a.track_count != b.track_count || a.next_group != b.next_group {
+	if len(a.parts) != len(b.parts) || len(a.flags) != len(b.flags) || len(a.cuts) != len(b.cuts) || len(a.clips) != len(b.clips) || a.track_count != b.track_count || a.next_group != b.next_group {
 		return false
+	}
+	for i in 0 ..< len(a.parts) {
+		if a.parts[i] != b.parts[i] {return false}
 	}
 	for i in 0 ..< len(a.flags) {
 		if a.flags[i] - {.Selected} != b.flags[i] - {.Selected} {return false} // selection is not history
@@ -77,7 +82,7 @@ history_commit :: proc(busy: bool) {
 }
 
 snapshot_of_temp :: proc() -> Snapshot {
-	return {project.clips[:], project.track_count, project.next_group, project.program[:], project.track_flags[:]}
+	return {project.clips[:], project.track_count, project.next_group, project.program[:], project.track_flags[:], project.parts[:]}
 }
 
 apply_snapshot :: proc(s: Snapshot) {
@@ -87,6 +92,8 @@ apply_snapshot :: proc(s: Snapshot) {
 	append(&project.program, ..s.cuts)
 	clear(&project.track_flags)
 	append(&project.track_flags, ..s.flags)
+	clear(&project.parts)
+	append(&project.parts, ..s.parts)
 	clear_track_selection(&project)
 	clear_cut_sel()
 	for &c in project.clips {

@@ -1,7 +1,6 @@
 package main
 
 import "core:math"
-import "core:math/rand"
 import "core:slice"
 
 // The program is a switcher over the video layers: a sorted list of cuts, each
@@ -86,107 +85,6 @@ program_split_grid :: proc(p: ^Project, from, to, spacing, origin: f64) {
 		cut_insert(p, origin + f64(k) * spacing)
 	}
 }
-
-// ---------------------------------------------------------------- randomize
-
-// Everything the randomizer needs, so the command and the context menu share one path.
-Rand_Job :: struct {
-	opts:    Rand_Options,
-	layers:  []int, // the layers to choose from (video layers only); empty = all of them
-	t0, t1:  f64,   // the range to randomize
-	end:     f64,   // project length
-	spacing: f64,   // grid spacing for Grid mode / when there are no cuts yet
-	origin:  f64,
-}
-
-// Program randomizer. The slicing comes from Rand_Options.slice:
-//   Grid     the range is re-cut on the grid (replacing its cuts)
-//   Pattern  ... at the hits of a pattern (job.cuts)
-//   Cuts     the cuts the program already has stay as they are (cut on the grid if none)
-// then, with Random ticked, every segment picks a random layer.
-//   Random  every segment picks a random layer (never more than max_run in a row)
-// (reordering footage = the rearrange stage, see rearrange.odin)
-program_randomize :: proc(p: ^Project, job: Rand_Job) {
-	modes := job.opts.modes
-	all := video_layers(p^)
-	cand := make([dynamic]int, context.temp_allocator)
-	for l in all {
-		if len(job.layers) == 0 || slice.contains(job.layers, l) {
-			append(&cand, l)
-		}
-	}
-	if len(cand) == 0 {
-		return
-	}
-	switch job.opts.slice {
-	case .Grid: // the grid replaces whatever cuts were inside the range
-		#reverse for c, i in p.program {
-			if c.time >= job.t0 - CUT_EPS && c.time < job.t1 - CUT_EPS {
-				ordered_remove(&p.program, i)
-			}
-		}
-		program_split_grid(p, job.t0, job.t1, job.spacing, job.origin)
-	case .Cuts, .Pattern: // keep the cuts that are there (a pattern was applied first); the grid if none
-		if len(p.program) == 0 {
-			program_split_grid(p, job.t0, job.t1, job.spacing, job.origin)
-		}
-	}
-
-	// segments whose start is inside [t0, t1)
-	first := max(segment_at(p^, job.t0), 0)
-	last := first
-	for c, i in p.program {
-		if c.time < job.t1 - CUT_EPS {last = i}
-	}
-	if last < first || len(p.program) == 0 {
-		return
-	}
-	if .Random in modes {
-		assign_random(p, cand[:], job, first, last)
-	}
-}
-
-// A random layer for the segment starting at `t`: only layers that have video
-// there, never more than `max_run` in a row of the same one (if there is a choice).
-pick_layer :: proc(p: Project, cand: []int, t, t_end: f64, prev, run, max_run: int) -> int {
-	mid := (t + t_end) / 2
-	pool := make([dynamic]int, context.temp_allocator)
-	for l in cand {
-		for c in p.clips {
-			if c.kind == .Video && c.track == l && mid >= c.start && mid < clip_end(c) {
-				append(&pool, l)
-				break
-			}
-		}
-	}
-	if len(pool) == 0 {
-		pool = slice.to_dynamic(cand, context.temp_allocator)
-	}
-	if max_run > 0 && run >= max_run && len(pool) > 1 {
-		if k, found := slice.linear_search(pool[:], prev); found {
-			unordered_remove(&pool, k)
-		}
-	}
-	return pool[rand.int_max(len(pool))]
-}
-
-assign_random :: proc(p: ^Project, cand: []int, job: Rand_Job, first, last: int) {
-	prev, run := first > 0 ? p.program[first - 1].layer : -1, 0
-	if first > 0 && prev >= 0 { // count the run that is already there
-		run = 1
-		for k := first - 2; k >= 0 && p.program[k].layer == prev; k -= 1 {run += 1}
-	}
-	for i in first ..= last {
-		layer := p.program[i].layer
-		if !p.program[i].fixed { // a layer a pattern lane set stays; everything else is dealt out
-			layer = pick_layer(p^, cand, p.program[i].time, segment_end(p^, i, job.end), prev, run, int(job.opts.max_run))
-			p.program[i].layer = layer
-		}
-		run = layer == prev ? run + 1 : 1
-		prev = layer
-	}
-}
-
 
 // ---------------------------------------------------------------- copy / paste / repeat
 

@@ -62,6 +62,7 @@ Settings :: struct {
 	master_db:     f32, // master volume
 	grid_offset:   f64, // seconds: where the grid starts (the first beat of the music)
 	rand:          Rand_Options, // the Randomize command
+	bg:            [3]f32, // background colour of the picture (r, g, b: 0..1)
 	pattern_sel:   i32, // current cutting pattern
 	bpm_lo:        f32, // tempo detection only looks for tempos in this range
 	bpm_hi:        f32,
@@ -107,6 +108,7 @@ Project :: struct {
 	program:     [dynamic]Cut, // which layer is shown when, sorted by time. see program.odin
 	track_flags: [dynamic]Track_Flags, // per track; kept as long as track_count (sync_tracks)
 	patterns:    [dynamic]Pattern, // cutting patterns, see patterns.odin
+	parts:       [dynamic]Part, // time ranges with their own pattern
 }
 
 Track_Flag :: enum u8 {
@@ -158,6 +160,7 @@ project_reset :: proc(p: ^Project) {
 	delete(p.program)
 	delete(p.track_flags)
 	delete(p.patterns)
+	delete(p.parts)
 	p^ = {}
 	p.settings = {
 		fps    = 30,
@@ -169,9 +172,10 @@ project_reset :: proc(p: ^Project) {
 		bpm = 120,
 		grid_div = 4,
 		cut_every = 1,
+		bg = {0, 0, 0},
 		bpm_lo = 80,
 		bpm_hi = 180,
-		rand = {modes = {.Random}, slice = .Cuts, pattern = -1, max_run = 1},
+		rand = {footage = .Same_Time, slice = .Cuts, pattern = -1, max_run = 1},
 	}
 	set_name(&p.settings, "untitled")
 }
@@ -511,24 +515,31 @@ toggle_flag_on_selected :: proc(p: ^Project, flag: Track_Flag) {
 
 // ---- randomize options ----
 
-Rand_Mode :: enum u8 { // checkboxes (see program_randomize and rearrange)
-	Random,       // program: every segment gets a random layer
-	Time_Shuffle, // rearrange: the cells inside a clip come in random order
-	Clip_Shuffle, // rearrange: which clip comes next is random (clips take equal turns); alone, each clip keeps its own order
-	Use_All,      // rearrange: use every cell until none is left (else only as many as fit the original span)
+// Randomize fills every slot of a rhythm with a slice of footage on a new layer. The
+// slicing says where the slots are; these say what goes into them.
+Rand_Footage :: enum u8 {
+	Same_Time, // the footage that plays at the slot's own time (a cut-away between the clips)
+	In_Order,  // each clip plays forward: its next piece
+	Any_Piece, // a random piece of the clip
 }
-Rand_Modes :: bit_set[Rand_Mode;u8]
 
-// Where Randomize slices (the cells / segments it works on).
+// Where Randomize slices (the slots).
 Rand_Slice :: enum u8 {
 	Cuts,    // the cuts the program already has (e.g. from an applied pattern); the grid if there are none
-	Pattern, // the hits of a pattern (Rand_Options.pattern, -1 = the current one)
-	Grid,    // the beat grid (cut every N lines); replaces the cuts in the range
+	Pattern, // the hits of the pattern (of each part, if the project has parts)
+	Grid,    // the beat grid (cut every N lines)
 }
 
 Rand_Options :: struct {
-	modes:   Rand_Modes,
+	footage: Rand_Footage,
 	slice:   Rand_Slice,
-	pattern: i32, // for slice = Pattern: index of the pattern, -1 = the current one
-	max_run: i32, // most consecutive segments / cells from the same layer / clip; 0 = no limit
+	pattern: i32,  // for slice = Pattern without parts: index of the pattern, -1 = the current one
+	use_all: bool, // go on (the rhythm loops) until every piece of footage is used; In_Order and Any_Piece only
+	max_run: i32,  // most consecutive slots filled from the same clip; 0 = no limit
+}
+
+// A time range of the project that has its own pattern.
+Part :: struct {
+	t0, t1:  f64,
+	pattern: i32, // index into Project.patterns, -1 = none
 }

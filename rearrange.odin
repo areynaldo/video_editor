@@ -4,26 +4,28 @@ import "core:math"
 import "core:math/rand"
 import "core:slice"
 
-// Rearranging footage onto the rhythm. The slicing (grid, a pattern's hits, the
-// program's cuts) gives SLOTS: the intervals between slicing times, at their real
-// positions on a NEW layer on top. The video clips on the chosen layers give PIECES
-// of footage of the same lengths (their own intervals between the same slicing
-// times). Every slot is filled with one piece, so the rhythm of the pattern is kept
-// and only the footage is distributed:
-//   clip shuffle  which clip fills the next slot is random and clips take equal turns
-//                 (without it, clips are picked in proportion to the pieces they have)
-//   time shuffle  which piece of that clip: a random one (without it, the clip's
-//                 next piece in time order, so every clip plays forward)
-// A piece is used once. use all clips: the slicing goes on (the pattern loops) until
-// every piece is used; without it only the original span is filled and the rest of the
-// footage is not seen. Neighbouring slots filled with consecutive footage of the same
-// clip are merged into one clip.
+// Randomize. The slicing (the program's cuts, a pattern's hits, the grid) gives SLOTS:
+// the intervals between slicing times, at their real positions on a NEW layer on top.
+// Every slot is filled with a slice of footage from one of the video clips, so the
+// rhythm is kept and only the footage is distributed. Which clip: random, and the
+// clips take equal turns (a pattern lane or a cut that has a layer pins its slots to
+// that layer). Which footage (Rand_Footage):
+//   same time  what plays at the slot's own time: a cut-away between the clips
+//   in order   the clip's next piece, so every clip plays forward
+//   any piece  a random piece of the clip
+// With in order / any piece a piece is used once. use all clips: the slicing goes on
+// (the rhythm loops) until every piece is used; without it only the original span is
+// filled and the rest of the footage is not seen. Neighbouring slots filled with
+// consecutive footage of the same clip are merged into one clip.
+
+PIN_NONE :: -1 // a slot any clip may fill
+PIN_SKIP :: -2 // a slot to leave empty (the gap between parts)
 
 Rearrange_Result :: struct {
 	clips:  int, // clips created on the new layer
-	cells:  int, // pieces used
-	unused: int, // pieces left out
-	empty:  int, // slots no piece of the right length was left for
+	cells:  int, // slots filled
+	unused: int, // pieces left out (in order / any piece)
+	empty:  int, // slots no clip could fill
 	track:  int, // the new layer
 	bounds: []f64, // where each filled slot starts (what the program should mark)
 }
@@ -60,8 +62,9 @@ candidate_span :: proc(p: Project, cands: []int) -> (lo, hi: f64) {
 }
 
 // times: sorted slicing times (slot boundaries), long enough for what is asked: past
-// `hi` only when use_all is on. lo..hi is the span the candidate clips cover.
-rearrange :: proc(p: ^Project, o: Rand_Options, cands: []int, times: []f64, lo, hi: f64) -> (res: Rearrange_Result) {
+// `hi` only when use_all is on. pins[i]: what slot i (times[i]..times[i+1]) is limited
+// to: a track number, PIN_NONE or PIN_SKIP. lo..hi is the span to fill.
+rearrange :: proc(p: ^Project, o: Rand_Options, cands: []int, times: []f64, pins: []int, lo, hi: f64) -> (res: Rearrange_Result) {
 	if len(cands) == 0 || len(times) < 2 {
 		return
 	}
@@ -73,31 +76,35 @@ rearrange :: proc(p: ^Project, o: Rand_Options, cands: []int, times: []f64, lo, 
 		head:  int, // pieces before head are used
 	}
 	class_of :: proc(dur: f64) -> i64 {return i64(math.round(dur * 10000))}
+	same_time := o.footage == .Same_Time
 
-	// the lengths that occur, and per clip a bag for each
+	// in order / any piece: the pieces of every clip, sorted into bags by length
 	classes := make([dynamic]i64, context.temp_allocator)
-	for i in 0 ..< len(times) - 1 {
-		if k := class_of(times[i + 1] - times[i]); !slice.contains(classes[:], k) {append(&classes, k)}
-	}
-	bags := make([][]Bag, len(cands), context.temp_allocator)
-	for &row in bags {
-		row = make([]Bag, len(classes), context.temp_allocator)
-		for &b in row {b.items = make([dynamic]Piece, context.temp_allocator)}
-	}
+	bags: [][]Bag
 	total := 0
-	for ci, k in cands {
-		c := p.clips[ci]
+	if !same_time {
 		for i in 0 ..< len(times) - 1 {
-			a, b := times[i], times[i + 1]
-			if a >= c.start - 1e-6 && b <= clip_end(c) + 1e-6 && b - a > 1e-6 {
-				idx, _ := slice.linear_search(classes[:], class_of(b - a))
-				append(&bags[k][idx].items, Piece{c.in_point + (a - c.start) * c.speed, b - a})
-				total += 1
+			if k := class_of(times[i + 1] - times[i]); !slice.contains(classes[:], k) {append(&classes, k)}
+		}
+		bags = make([][]Bag, len(cands), context.temp_allocator)
+		for &row in bags {
+			row = make([]Bag, len(classes), context.temp_allocator)
+			for &b in row {b.items = make([dynamic]Piece, context.temp_allocator)}
+		}
+		for ci, k in cands {
+			c := p.clips[ci]
+			for i in 0 ..< len(times) - 1 {
+				a, b := times[i], times[i + 1]
+				if a >= c.start - 1e-6 && b <= clip_end(c) + 1e-6 && b - a > 1e-6 {
+					idx, _ := slice.linear_search(classes[:], class_of(b - a))
+					append(&bags[k][idx].items, Piece{c.in_point + (a - c.start) * c.speed, b - a})
+					total += 1
+				}
 			}
 		}
-	}
-	if total == 0 {
-		return
+		if total == 0 {
+			return
+		}
 	}
 
 	// fill the slots in time order
@@ -110,14 +117,24 @@ rearrange :: proc(p: ^Project, o: Rand_Options, cands: []int, times: []f64, lo, 
 	for i in 0 ..< len(times) - 1 {
 		a, b := times[i], times[i + 1]
 		if a < lo - 1e-6 {continue}
-		if o.modes & {.Use_All} == {} && b > hi + 1e-6 {break}
-		if used == total {break}
-		cls, found := slice.linear_search(classes[:], class_of(b - a))
-		if !found {continue}
+		if (same_time || !o.use_all) && b > hi + 1e-6 {break}
+		pin := i < len(pins) ? pins[i] : PIN_NONE
+		if pin == PIN_SKIP {continue}
+		if !same_time && used == total {break}
+		cls := -1
+		if !same_time {
+			cls, _ = slice.linear_search(classes[:], class_of(b - a))
+		}
 
-		pool := make([dynamic]int, context.temp_allocator) // clips with a piece of this length left
+		pool := make([dynamic]int, context.temp_allocator) // clips that can fill this slot
 		for k in 0 ..< len(cands) {
-			if bags[k][cls].head < len(bags[k][cls].items) {append(&pool, k)}
+			c := p.clips[cands[k]]
+			if pin >= 0 && c.track != pin {continue}
+			if same_time {
+				if a >= c.start - 1e-6 && b <= clip_end(c) + 1e-6 {append(&pool, k)}
+			} else if bags[k][cls].head < len(bags[k][cls].items) {
+				append(&pool, k)
+			}
 		}
 		if len(pool) == 0 {
 			res.empty += 1
@@ -126,30 +143,23 @@ rearrange :: proc(p: ^Project, o: Rand_Options, cands: []int, times: []f64, lo, 
 		if o.max_run > 0 && run >= int(o.max_run) && len(pool) > 1 {
 			if j, ok := slice.linear_search(pool[:], prev); ok {unordered_remove(&pool, j)}
 		}
-		k: int
-		if .Clip_Shuffle in o.modes {
-			k = pool[rand.int_max(len(pool))] // equal turns
-		} else { // in proportion to the pieces each has left, so every piece is equally likely
-			left := 0
-			for q in pool {left += len(bags[q][cls].items) - bags[q][cls].head}
-			r := rand.int_max(left)
-			for q in pool {
-				r -= len(bags[q][cls].items) - bags[q][cls].head
-				if r < 0 {
-					k = q
-					break
-				}
+		k := pool[rand.int_max(len(pool))] // equal turns
+
+		src_in: f64
+		if same_time {
+			c := p.clips[cands[k]]
+			src_in = c.in_point + (a - c.start) * c.speed
+		} else {
+			bag := &bags[k][cls]
+			if o.footage == .Any_Piece {
+				j := bag.head + rand.int_max(len(bag.items) - bag.head)
+				bag.items[j], bag.items[bag.head] = bag.items[bag.head], bag.items[j]
 			}
+			src_in = bag.items[bag.head].src_in
+			bag.head += 1
 		}
-		bag := &bags[k][cls]
-		if .Time_Shuffle in o.modes {
-			j := bag.head + rand.int_max(len(bag.items) - bag.head)
-			bag.items[j], bag.items[bag.head] = bag.items[bag.head], bag.items[j]
-		}
-		piece := bag.items[bag.head]
-		bag.head += 1
 		used += 1
-		append(&entries, Entry{a, b - a, piece.src_in, k})
+		append(&entries, Entry{a, b - a, src_in, k})
 		run = k == prev ? run + 1 : 1
 		prev = k
 	}
@@ -183,7 +193,7 @@ rearrange :: proc(p: ^Project, o: Rand_Options, cands: []int, times: []f64, lo, 
 		res.clips += 1
 		i = j
 	}
-	res.cells, res.unused, res.track, res.bounds = len(entries), total - len(entries), track, bounds[:]
+	res.cells, res.unused, res.track, res.bounds = len(entries), same_time ? 0 : total - len(entries), track, bounds[:]
 	return
 }
 

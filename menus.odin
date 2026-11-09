@@ -175,65 +175,65 @@ panel_randomize :: proc() {
 		return
 	}
 	o := &project.settings.rand
-	mode_box :: proc(o: ^Rand_Options, m: Rand_Mode, label: cstring, hint: cstring, clears: Rand_Modes = {}) {
-		on := m in o.modes
-		if im.Checkbox(label, &on) {
-			if on {o.modes += {m}; o.modes -= clears} else {o.modes -= {m}}
-		}
-		im.SameLine(150)
-		im.TextDisabled(hint)
-	}
-	
+
+	// 1. where the slots are
 	slice_i := i32(o.slice)
-	im.SetNextItemWidth(220)
-	if im.Combo("slice at", &slice_i, "the program's cuts\x00a pattern's hits\x00the beat grid\x00\x00") {
+	im.SetNextItemWidth(230)
+	if im.Combo("slice at", &slice_i, "the program's cuts\x00the pattern\x00the beat grid\x00\x00") {
 		o.slice = Rand_Slice(slice_i)
 	}
 	switch o.slice {
-	case .Grid: im.TextDisabled("re-cuts the range on the grid")
-	case .Cuts: im.TextDisabled(cstr(len(project.program) > 0 ? fmt.tprintf("keeps the %d cuts it has", len(project.program)) : "no cuts yet: uses the grid"))
+	case .Grid: im.TextDisabled("every slice-every lines of the grid")
+	case .Cuts: im.TextDisabled(cstr(len(project.program) > 0 ? fmt.tprintf("the %d cuts it has", len(project.program)) : "no cuts yet: the grid is used"))
 	case .Pattern:
-		label := "current pattern"
-		if i := int(o.pattern); i >= 0 && i < len(project.patterns) {
-			label = get_fixed(project.patterns[i].name[:])
-		}
-		im.SetNextItemWidth(220)
-		if im.BeginCombo("pattern", cstr(label)) {
-			if im.Selectable("current pattern", o.pattern < 0) {o.pattern = -1}
-			for &q, i in project.patterns {
-				if im.Selectable(cstr(fmt.tprintf("%s###rp%d", get_fixed(q.name[:]), i)), int(o.pattern) == i) {o.pattern = i32(i)}
+		if len(project.parts) > 0 {
+			im.TextDisabled(cstr(fmt.tprintf("the pattern of each of the %d parts", len(project.parts))))
+		} else {
+			label := "current pattern"
+			if i := int(o.pattern); i >= 0 && i < len(project.patterns) {
+				label = get_fixed(project.patterns[i].name[:])
 			}
-			im.EndCombo()
+			im.SetNextItemWidth(230)
+			if im.BeginCombo("pattern", cstr(label)) {
+				if im.Selectable("current pattern", o.pattern < 0) {o.pattern = -1}
+				for &q, i in project.patterns {
+					if im.Selectable(cstr(fmt.tprintf("%s###rp%d", get_fixed(q.name[:]), i)), int(o.pattern) == i) {o.pattern = i32(i)}
+				}
+				im.EndCombo()
+			}
 		}
 	}
-	im.Separator()
-	mode_box(o, .Random, "random layers", "each cut shows a random layer")
-	im.Separator()
-	im.TextDisabled("rearrange into a new layer:")
-	mode_box(o, .Clip_Shuffle, "clip shuffle", "random clip next, each in its own order")
-	mode_box(o, .Time_Shuffle, "time shuffle", "random piece of the clip")
-	mode_box(o, .Use_All, "use all clips", "until every piece is used")
+
+	// 2. what goes into them
+	footage := i32(o.footage)
+	im.SetNextItemWidth(230)
+	if im.Combo("footage", &footage, "same time\x00in order\x00any piece\x00\x00") {
+		o.footage = Rand_Footage(footage)
+	}
+	switch o.footage {
+	case .Same_Time: im.TextDisabled("what plays at that time: cuts between the clips")
+	case .In_Order:  im.TextDisabled("each clip plays forward, a piece at a time")
+	case .Any_Piece: im.TextDisabled("a random piece of the clip")
+	}
+	if o.footage != .Same_Time {
+		im.Checkbox("use all clips", &o.use_all)
+		im.SameLine()
+		im.TextDisabled("the rhythm loops until every piece is used")
+	}
 	im.SetNextItemWidth(90)
 	im.InputInt("max in a row (0 = any)", &o.max_run)
 	o.max_run = max(o.max_run, 0)
+
 	im.Separator()
-	// what it will act on
 	names := make([dynamic]string, context.temp_allocator)
 	for t in selected_tracks(project) {
 		if ord := layer_ordinal(tracks_video, t); ord >= 0 {
 			append(&names, fmt.tprintf("V%d", ord + 1))
 		}
 	}
-	if len(names) > 0 {
-		im.Text("on: %s", cstr(strings.join(names[:], ", ", context.temp_allocator)))
-	} else {
-		im.TextDisabled("on: all video layers")
-	}
-	if .Time_Shuffle in o.modes || .Clip_Shuffle in o.modes {
-		im.TextDisabled(cstr(fmt.tprintf("%d video clips", len(rearrange_candidates(project)))))
-	} else {
-		im.TextDisabled(cstr(sel_cut >= 0 ? "in: the selected range" : "in: everything"))
-	}
+	_, _, ranged := program_range()
+	im.TextDisabled(cstr(fmt.tprintf("%d video clips%s%s", len(rearrange_candidates(project)),
+		len(names) > 0 ? fmt.tprintf(" on %s", strings.join(names[:], ", ", context.temp_allocator)) : "", ranged ? ", in the selected range" : "")))
 	if im.Button("Randomize") {
 		do_action(.Randomize)
 	}
@@ -278,6 +278,7 @@ Context :: enum {
 	Lane,
 	Header,
 	Segment,
+	Part,
 }
 
 ctx_kind: Context
@@ -317,6 +318,26 @@ context_menu :: proc() {
 		im.Separator()
 		menu_action(.Randomize)
 		menu_action(.Randomize_Options)
+	case .Part:
+		if sel_part >= 0 && sel_part < len(project.parts) {
+			for &q, i in project.patterns {
+				if im.MenuItem(cstr(fmt.tprintf("Pattern: %s###pp%d", get_fixed(q.name[:]), i)), nil, project.parts[sel_part].pattern == i32(i)) {
+					project.parts[sel_part].pattern = i32(i)
+				}
+			}
+			if im.MenuItem("No pattern") {project.parts[sel_part].pattern = -1}
+			im.Separator()
+			if im.MenuItem("Apply this part") {
+				part := project.parts[sel_part]
+				if part.pattern >= 0 && int(part.pattern) < len(project.patterns) {
+					program_apply_pattern(&project, project.patterns[part.pattern], part.t0, part.t1, true)
+				}
+			}
+			if im.MenuItem("Remove part") {
+				ordered_remove(&project.parts, sel_part)
+				sel_part = -1
+			}
+		}
 	case .Segment: // acts on the selected range
 		for l, n in tracks_video {
 			if n >= 9 {break}

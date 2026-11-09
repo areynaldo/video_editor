@@ -16,7 +16,7 @@ save_project :: proc(p: Project, path: string) -> bool {
 	s := p.settings
 	fmt.sbprintf(&b, "[project]\nname = %s\nfps = %d\nwidth = %d\nheight = %d\nformat = %s\n", settings_name(&p.settings), s.fps, s.width, s.height, FORMAT_EXT[s.format])
 	fmt.sbprintf(&b, "grid = %d\ngrid_type = %d\nbpm = %.3f\ngrid_div = %d\n", s.grid_on ? 1 : 0, int(s.grid_type), s.bpm, s.grid_div)
-	fmt.sbprintf(&b, "cut_every = %d\nmaster = %.2f\ngrid_offset = %.4f\nrand_opts = %d\nrand_slice = %d\nrand_pattern = %d\nrand_max_run = %d\n", s.cut_every, s.master_db, s.grid_offset, int(transmute(u8)s.rand.modes), int(s.rand.slice), s.rand.pattern, s.rand.max_run)
+	fmt.sbprintf(&b, "cut_every = %d\nmaster = %.2f\ngrid_offset = %.4f\nrand_footage = %d\nrand_use_all = %d\nrand_slice = %d\nrand_pattern = %d\nrand_max_run = %d\nbg = %02x%02x%02x\n", s.cut_every, s.master_db, s.grid_offset, int(s.rand.footage), s.rand.use_all ? 1 : 0, int(s.rand.slice), s.rand.pattern, s.rand.max_run, int(s.bg.r * 255 + 0.5), int(s.bg.g * 255 + 0.5), int(s.bg.b * 255 + 0.5))
 	fmt.sbprintf(&b, "pattern_sel = %d\nbpm_lo = %.0f\nbpm_hi = %.0f\n", s.pattern_sel, s.bpm_lo, s.bpm_hi)
 	for pat in p.patterns {
 		pat := pat
@@ -29,6 +29,9 @@ save_project :: proc(p: Project, path: string) -> bool {
 			}
 			strings.write_string(&b, "\n")
 		}
+	}
+	for part in p.parts {
+		fmt.sbprintf(&b, "\n[part]\nt0 = %.6f\nt1 = %.6f\npattern = %d\n", part.t0, part.t1, part.pattern)
 	}
 	for cut in p.program {
 		fmt.sbprintf(&b, "\n[cut]\ntime = %.6f\nlayer = %d\nfixed = %d\n", cut.time, cut.layer, cut.fixed ? 1 : 0)
@@ -75,6 +78,7 @@ load_project :: proc(p: ^Project, path: string) -> (err: string) {
 			case "clip":   append(&p.clips, Clip{speed = 1, scale = 1})
 			case "cut":    append(&p.program, Cut{layer = -1})
 			case "pattern": append(&p.patterns, Pattern{length = 16, div = 4})
+			case "part":    append(&p.parts, Part{pattern = -1})
 			}
 			continue
 		}
@@ -102,7 +106,12 @@ load_project :: proc(p: ^Project, path: string) -> (err: string) {
 			case "bpm_lo":       p.settings.bpm_lo = f32(clamp(f, 40, 220))
 			case "bpm_hi":       p.settings.bpm_hi = f32(clamp(f, 60, 260))
 			case "pattern_sel":  p.settings.pattern_sel = i32(max(n, 0))
-			case "rand_opts":    p.settings.rand.modes = transmute(Rand_Modes)u8(n)
+			case "rand_footage": p.settings.rand.footage = Rand_Footage(clamp(n, 0, 2))
+			case "rand_use_all": p.settings.rand.use_all = n != 0
+			case "bg":
+				if v, ok := strconv.parse_int(val, 16); ok {
+					p.settings.bg = {f32((v >> 16) & 255) / 255, f32((v >> 8) & 255) / 255, f32(v & 255) / 255}
+				}
 			case "rand_slice":   p.settings.rand.slice = Rand_Slice(clamp(n, 0, 2))
 			case "rand_pattern": p.settings.rand.pattern = i32(n)
 			case "rand_max_run": p.settings.rand.max_run = i32(max(n, 0))
@@ -152,6 +161,13 @@ load_project :: proc(p: ^Project, path: string) -> (err: string) {
 						if i < MAX_STEPS && (strconv.parse_int(strings.trim_space(part)) or_else 0) == v {lane.steps[i] = 1}
 					}
 				}
+			}
+		case "part":
+			part := &p.parts[len(p.parts) - 1]
+			switch key {
+			case "t0":      part.t0 = f
+			case "t1":      part.t1 = f
+			case "pattern": part.pattern = i32(n)
 			}
 		case "cut":
 			c := &p.program[len(p.program) - 1]

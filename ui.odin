@@ -117,7 +117,7 @@ panel_preview :: proc() {
 	im.Dummy(avail)
 
 	dl := im.GetWindowDrawList()
-	im.DrawList_AddRectFilled(dl, a, b, 0xFF000000)
+	im.DrawList_AddRectFilled(dl, a, b, im.ColorConvertFloat4ToU32({s.bg.r, s.bg.g, s.bg.b, 1})) // the background colour
 	ci := video_clip_at(project, playhead)
 	if ci < 0 {
 		return
@@ -150,6 +150,31 @@ panel_preview :: proc() {
 
 // ---------------------------------------------------------------- inspector / project
 
+// Which clips an edit in the Inspector reaches.
+Apply_Scope :: enum {
+	Selected,    // the selected clips
+	Same_Source, // every slice that comes from the same file as a selected clip
+	All,         // every clip of that kind
+}
+inspector_scope: Apply_Scope
+
+// Does an Inspector edit reach clip k (the edit is for clips of `kind`)? Locked layers are left alone.
+inspector_hits :: proc(k: Clip, kind: Clip_Kind) -> bool {
+	if k.kind != kind || track_has(project, k.track, .Locked) {
+		return false
+	}
+	switch inspector_scope {
+	case .Selected: return k.selected
+	case .Same_Source:
+		for c in project.clips {
+			if c.selected && c.kind == kind && c.source == k.source {return true}
+		}
+		return false
+	case .All: return true
+	}
+	return false
+}
+
 panel_inspector :: proc() {
 	defer im.End()
 	if !im.Begin("Inspector", &show_inspector) {
@@ -166,6 +191,11 @@ panel_inspector :: proc() {
 		return
 	}
 	info := project.clips[vi >= 0 ? vi : ai]
+	scope := i32(inspector_scope)
+	im.SetNextItemWidth(-90)
+	if im.Combo("apply to", &scope, "selected clips\x00all slices of the clip\x00all clips\x00\x00") {
+		inspector_scope = Apply_Scope(scope)
+	}
 	im.TextUnformatted(cstr(project.sources[info.source].path))
 	im.Text("start %.2fs   length %.2fs   speed %.2fx", info.start, info.duration, info.speed)
 
@@ -183,7 +213,7 @@ panel_inspector :: proc() {
 		}
 		if changed {
 			for &k in project.clips {
-				if k.selected && k.kind == .Video {
+				if inspector_hits(k, .Video) {
 					k.pos, k.scale, k.rotation = c.pos, c.scale, c.rotation
 				}
 			}
@@ -200,7 +230,7 @@ panel_inspector :: proc() {
 		}
 		if changed {
 			for &k in project.clips {
-				if k.selected && k.kind == .Audio {
+				if inspector_hits(k, .Audio) {
 					k.gain_db = g
 				}
 			}
@@ -305,6 +335,7 @@ panel_project :: proc() {
 	// 4. project
 	if im.CollapsingHeader("Project settings") {
 		im.InputText("name", cstring(&s.name[0]), len(s.name))
+		im.ColorEdit3("background", &s.bg, {.NoInputs})
 		im.DragInt("frame rate", &s.fps, 0.2, 1, 120)
 		im.InputInt("width", &s.width, 2, 100)
 		im.InputInt("height", &s.height, 2, 100)
