@@ -1,5 +1,6 @@
 package main
 
+import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:slice"
@@ -177,7 +178,7 @@ rearrange :: proc(p: ^Project, o: Rand_Options, cands: []int, times: []f64, pins
 		dur := entries[i].dur
 		j := i + 1
 		for j < len(entries) && entries[j].clip == entries[i].clip && abs(entries[j].start - (entries[i].start + dur)) < 1e-6 &&
-		    abs(entries[j].src_in - (entries[i].src_in + dur * src.speed)) < 1e-6 {
+		abs(entries[j].src_in - (entries[i].src_in + dur * src.speed)) < 1e-6 {
 			dur += entries[j].dur
 			j += 1
 		}
@@ -187,7 +188,7 @@ rearrange :: proc(p: ^Project, o: Rand_Options, cands: []int, times: []f64, pins
 		out.start = entries[i].start
 		out.in_point = entries[i].src_in
 		out.duration = dur
-		out.group = 0
+		out.group, out.slice, out.locked = 0, true, false
 		out.selected = false
 		append(&p.clips, out)
 		res.clips += 1
@@ -195,6 +196,82 @@ rearrange :: proc(p: ^Project, o: Rand_Options, cands: []int, times: []f64, pins
 	}
 	res.cells, res.unused, res.track, res.bounds = len(entries), same_time ? 0 : total - len(entries), track, bounds[:]
 	return
+}
+
+// Takes the locked slices out of the project so Randomize can keep them, and drops the
+// rest of the layers they were on (the old result). Layers left empty are removed.
+take_locked :: proc(p: ^Project) -> []Clip {
+	kept := make([dynamic]Clip, context.temp_allocator)
+	layers := make([dynamic]int, context.temp_allocator)
+	for c in p.clips {
+		if c.slice && c.locked && c.kind == .Video && !slice.contains(layers[:], c.track) {append(&layers, c.track)}
+	}
+	#reverse for c, i in p.clips {
+		if c.slice && c.kind == .Video && slice.contains(layers[:], c.track) {
+			if c.locked {inject_at(&kept, 0, c)}
+			ordered_remove(&p.clips, i)
+		}
+	}
+	slice.sort(layers[:])
+	#reverse for t in layers {
+		used := false
+		for c in p.clips {used ||= c.track == t}
+		if !used {remove_track(p, t)}
+	}
+	return kept[:]
+}
+
+// Switches the footage of one slice by one step (dir = +1 next, -1 previous, 0 = reroll:
+// a random one). Which
+// footage comes next depends on the Randomize mode:
+//   same time  the next clip that covers the slice's time
+//   in order   the next piece of the same clip
+//   any piece  a random piece of a random clip
+// The slice is locked afterwards: you picked it. Returns false when nothing could change.
+slice_nudge :: proc(p: ^Project, ci: int, dir: int, mode: Rand_Footage) -> bool {
+	c := &p.clips[ci]
+	if c.kind != .Video || !c.slice {return false}
+	switch mode {
+	case .Same_Time:
+		list := make([dynamic]int, context.temp_allocator)
+		cur := -1
+		for o, i in p.clips {
+			if o.kind != .Video || o.slice || c.start < o.start - 1e-6 || clip_end(c^) > clip_end(o) + 1e-6 {continue}
+			append(&list, i)
+			if o.source == c.source && abs(o.in_point + (c.start - o.start) * o.speed - c.in_point) < 1e-3 {cur = len(list) - 1}
+		}
+		n := len(list)
+		if n == 0 || (n == 1 && cur == 0) {return false}
+		next := cur < 0 ? (dir > 0 ? 0 : n - 1) : (cur + dir + n) % n
+		if dir == 0 { // reroll: any clip but this one
+			next = rand.int_max(n)
+			if n > 1 && next == cur {next = (next + 1) % n}
+		}
+		o := p.clips[list[next]]
+		c.source, c.speed, c.pos, c.scale, c.rotation = o.source, o.speed, o.pos, o.scale, o.rotation
+		c.in_point = o.in_point + (c.start - o.start) * o.speed
+	case .In_Order:
+		span := c.duration * c.speed
+		room := max(p.sources[c.source].duration - span, 0)
+		in_point := clamp(c.in_point + f64(dir) * span, 0, room)
+		if dir == 0 { // reroll: any piece of this clip's file
+			in_point = f64(rand.int_max(max(int(math.floor(room / span)), 0) + 1)) * span
+		}
+		if abs(in_point - c.in_point) < 1e-6 {return false}
+		c.in_point = in_point
+	case .Any_Piece:
+		list := make([dynamic]int, context.temp_allocator)
+		for o, i in p.clips {
+			if o.kind == .Video && !o.slice && o.duration >= c.duration - 1e-6 {append(&list, i)}
+		}
+		if len(list) == 0 {return false}
+		o := p.clips[list[rand.int_max(len(list))]]
+		pieces := max(int(math.floor(o.duration / c.duration + 1e-6)), 1)
+		c.source, c.speed, c.pos, c.scale, c.rotation = o.source, o.speed, o.pos, o.scale, o.rotation
+		c.in_point = o.in_point + f64(rand.int_max(pieces)) * c.duration * o.speed
+	}
+	c.locked = true
+	return true
 }
 
 // Removes clips of one kind. Scope: the selected clips, else the clips on the selected
@@ -255,4 +332,124 @@ remove_layers_of_kind :: proc(p: ^Project, kind: Clip_Kind) -> (removed: int) {
 		removed += 1
 	}
 	return
+}
+
+// Randomize: fill the slots of a rhythm with slices of footage on a new layer (see
+// rearrange.odin). The slicing comes from Rand_Options.slice: the program's cuts, the
+// pattern (each part's own pattern if the project has parts), or the grid. A selected
+// program range limits it to that range.
+run_randomize :: proc() {
+	s := project.settings
+	step, _ := grid_step(s)
+	spacing, origin := step * f64(max(s.cut_every, 1)), grid_origin(s)
+	kept := take_locked(&project) // locked slices stay; the rest of their layer is the old result
+	cands := rearrange_candidates(project)
+	if len(cands) == 0 {
+		if len(kept) > 0 {put_locked(kept, -1)}
+		set_status("no video clips to randomize")
+		return
+	}
+	lo, hi := candidate_span(project, cands)
+	t0, t1, ranged := program_range()
+	if ranged {lo, hi = t0, t1}
+	total := 0.0
+	for ci in cands {total += project.clips[ci].duration}
+	use_all := s.rand.use_all && s.rand.footage != .Same_Time
+	// the slicing times; with "use all" they run on (the rhythm loops) until the footage would be used up
+	horizon := use_all ? lo + (hi - lo) + total : hi
+
+	times := make([dynamic]f64, context.temp_allocator)
+	pins := make([dynamic]int, context.temp_allocator)
+	switch s.rand.slice {
+	case .Pattern:
+		if len(project.parts) > 0 {
+			parts_slots(project, lo, horizon, &times, &pins)
+		} else {
+			pat: ^Pattern
+			if i := int(s.rand.pattern); i >= 0 && i < len(project.patterns) {
+				pat = &project.patterns[i]
+			} else {
+				pat = cur_pattern()
+			}
+			if pat != nil {pattern_slots(project, pat^, lo, horizon, &times, &pins)}
+		}
+	case .Cuts:
+		for c in project.program {
+			if c.time >= lo - CUT_EPS && c.time <= hi + CUT_EPS {
+				append(&times, c.time)
+				append(&pins, c.fixed && c.layer >= 0 ? c.layer : PIN_NONE) // a layer a pattern lane or you set stays
+			}
+		}
+		if n := len(times); n >= 2 && use_all {
+			period := times[n - 1] - times[0]
+			for k := 1; times[0] + f64(k) * period < horizon; k += 1 { // loop the cuts
+				for i in 1 ..< n {
+					append(&times, times[i] + f64(k) * period)
+					append(&pins, pins[i])
+				}
+			}
+		}
+	case .Grid:
+	}
+	if len(times) < 2 { // no rhythm to use: the grid
+		clear(&times)
+		clear(&pins)
+		for k := int(math.ceil((lo - origin) / spacing - 1e-6)); origin + f64(k) * spacing <= horizon + spacing; k += 1 {
+			append(&times, origin + f64(k) * spacing)
+		}
+	}
+
+	// slots under a locked slice are not filled
+	for len(pins) < len(times) - 1 {append(&pins, PIN_NONE)}
+	for i in 0 ..< len(times) - 1 {
+		for k in kept {
+			if times[i] < clip_end(k) - 1e-6 && times[i + 1] > k.start + 1e-6 {pins[i] = PIN_SKIP}
+		}
+	}
+
+	res := rearrange(&project, s.rand, cands, times[:], pins[:], lo, hi)
+	put_locked(kept, res.cells > 0 ? res.track : -1)
+	if res.cells == 0 && len(kept) == 0 {
+		set_status("nothing to randomize: the clips do not cover a slot")
+		return
+	}
+	// the old cuts described the source clips, not this layer: mark its slots instead
+	end := hi
+	if n := len(res.bounds); n > 0 {end = max(end, res.bounds[n - 1] + 2 * CUT_EPS)}
+	if ranged {
+		#reverse for c, i in project.program {
+			if c.time >= lo - CUT_EPS && c.time < end {cut_remove(&project, i)}
+		}
+	} else {
+		clear(&project.program)
+	}
+	for t in res.bounds {
+		i := cut_insert(&project, t)
+		project.program[i].layer, project.program[i].fixed = -1, false // -1: the top layer shows, and that is the new one
+	}
+	for k in kept { // a cut where each locked slice starts and ends
+		for t in ([2]f64{k.start, clip_end(k)}) {
+			i := cut_insert(&project, t)
+			project.program[i].layer, project.program[i].fixed = -1, false
+		}
+	}
+	clear_cut_sel()
+	set_status("randomized: %d slices in %d clips on a new layer%s%s", res.cells, res.clips, len(kept) > 0 ? fmt.tprintf(", %d locked kept", len(kept)) : "", res.empty > 0 ? fmt.tprintf(" (%d empty slots)", res.empty) : "")
+}
+
+// Puts locked slices back on layer `track` (a new layer when track < 0). Returns the layer.
+put_locked :: proc(kept: []Clip, track: int) -> int {
+	track := track
+	if len(kept) == 0 {return track}
+	if track < 0 {
+		track = project.track_count
+		project.track_count += 1
+		sync_tracks(&project)
+	}
+	for c in kept {
+		c := c
+		c.track = track
+		append(&project.clips, c)
+	}
+	return track
 }

@@ -212,3 +212,16 @@ bpm_controls :: proc(s: ^Settings) {
 		im.TreePop()
 	}
 }
+
+// Formatted text, dimmed text, and a tooltip for the item just drawn. (They make the C string.)
+text_f :: proc(format: string, args: ..any) {
+	im.TextUnformatted(cstr(fmt.tprintf(format, ..args)))
+}
+
+dim_f :: proc(format: string, args: ..any) {
+	im.TextDisabled(cstr(fmt.tprintf(format, ..args)))
+}
+
+tip :: proc(text: string) {
+	if im.IsItemHovered() {im.SetTooltip(cstr(text))}
+}

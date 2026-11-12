@@ -104,7 +104,7 @@ media_start :: proc(s: Source, fps: int) {
 			command = {"ffmpeg", "-v", "error", "-i", s.path, "-vn", "-f", "s16le", "-ac", "2", "-ar", "44100", "pipe:1"},
 			stdout = w,
 		},
-	)
+		)
 	os.close(w)
 	if err != nil {
 		os.close(r)

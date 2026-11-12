@@ -59,6 +59,7 @@ view_menu :: proc() {
 	im.MenuItemBoolPtr("Timeline", nil, &show_timeline)
 	im.MenuItemBoolPtr("Randomize", nil, &show_randomize)
 	im.MenuItemBoolPtr("Patterns", nil, &show_patterns)
+	im.MenuItemBoolPtr("Lyrics", nil, &show_lyrics)
 	im.Separator()
 	if im.MenuItem("Reset layout") {
 		show_media, show_preview, show_timeline, show_inspector, show_project, show_levels = true, true, true, true, true, true
@@ -187,7 +188,7 @@ panel_randomize :: proc() {
 	case .Cuts: im.TextDisabled(cstr(len(project.program) > 0 ? fmt.tprintf("the %d cuts it has", len(project.program)) : "no cuts yet: the grid is used"))
 	case .Pattern:
 		if len(project.parts) > 0 {
-			im.TextDisabled(cstr(fmt.tprintf("the pattern of each of the %d parts", len(project.parts))))
+			dim_f("the pattern of each of the %d parts", len(project.parts))
 		} else {
 			label := "current pattern"
 			if i := int(o.pattern); i >= 0 && i < len(project.patterns) {
@@ -279,6 +280,7 @@ Context :: enum {
 	Header,
 	Segment,
 	Part,
+	Lyric,
 }
 
 ctx_kind: Context
@@ -300,6 +302,10 @@ context_menu :: proc() {
 	case .Clip:
 		menu_action(.Duplicate)
 		menu_action(.Delete)
+		menu_action(.Lock)
+		menu_action(.Smooth_Slowmo)
+		menu_action(.Enhance_Clips)
+		menu_action(.Slowmo_Enhance)
 		if im.MenuItem("Split here") {
 			split_at(&project, snap(ctx_time)) // the selected clips (and what they are linked to)
 		}
@@ -311,13 +317,30 @@ context_menu :: proc() {
 		if im.MenuItem("Duplicate layers") {duplicate_selected_tracks(&project)}
 		menu_action(.Remove_Layer)
 		im.Separator()
-		if im.MenuItem("Lock") {toggle_flag_on_selected(&project, .Locked)}
+		menu_action(.Lock)
+		menu_action(.Smooth_Slowmo)
+		menu_action(.Enhance_Clips)
+		menu_action(.Slowmo_Enhance)
 		if im.MenuItem("Hide video") {toggle_flag_on_selected(&project, .Hidden)}
 		if im.MenuItem("Mute audio") {toggle_flag_on_selected(&project, .Muted)}
 		if im.MenuItem("Solo audio") {toggle_flag_on_selected(&project, .Solo)}
 		im.Separator()
 		menu_action(.Randomize)
 		menu_action(.Randomize_Options)
+	case .Lyric:
+		if sel_lyric >= 0 && sel_lyric < len(project.lyrics) {
+			if im.MenuItem("Edit text...") {show_lyrics = true}
+			if im.MenuItem("Split at playhead") {lyric_split(&project, sel_lyric, playhead)}
+			if lyrics_selected() > 1 {
+				dim_f("%d lines selected: drag one to move them all", lyrics_selected())
+			}
+			if im.MenuItem("Merge with next") {lyric_merge(&project, sel_lyric)}
+			if im.MenuItem(lyrics_selected() > 1 ? "Delete selected lines" : "Delete") {do_action(.Delete)}
+			im.Separator()
+		}
+		if im.MenuItem("Add line here") {lyric_add(&project, snap(ctx_time))}
+		menu_action(.Lyrics_Open)
+		menu_action(.Lyrics_Export)
 	case .Part:
 		if sel_part >= 0 && sel_part < len(project.parts) {
 			for &q, i in project.patterns {

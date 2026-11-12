@@ -16,6 +16,7 @@ Snapshot :: struct {
 	cuts:        []Cut,
 	flags:       []Track_Flags,
 	parts:       []Part,
+	lyrics:      []Lyric,
 }
 
 MAX_HISTORY :: 200
@@ -24,7 +25,7 @@ undo_stack, redo_stack: [dynamic]Snapshot
 last_state: Snapshot
 
 snapshot_of :: proc(p: Project) -> Snapshot {
-	return {slice.clone(p.clips[:]), p.track_count, p.next_group, slice.clone(p.program[:]), slice.clone(p.track_flags[:]), slice.clone(p.parts[:])}
+	return {slice.clone(p.clips[:]), p.track_count, p.next_group, slice.clone(p.program[:]), slice.clone(p.track_flags[:]), slice.clone(p.parts[:]), slice.clone(p.lyrics[:])}
 }
 
 snapshot_free :: proc(s: Snapshot) {
@@ -32,31 +33,32 @@ snapshot_free :: proc(s: Snapshot) {
 	delete(s.cuts)
 	delete(s.flags)
 	delete(s.parts)
+	delete(s.lyrics)
 }
 
+// Same content, selection aside (selection is not history).
 same_content :: proc(a, b: Snapshot) -> bool {
-	if len(a.parts) != len(b.parts) || len(a.flags) != len(b.flags) || len(a.cuts) != len(b.cuts) || len(a.clips) != len(b.clips) || a.track_count != b.track_count || a.next_group != b.next_group {
+	if len(a.lyrics) != len(b.lyrics) || len(a.flags) != len(b.flags) || len(a.clips) != len(b.clips) || a.track_count != b.track_count || a.next_group != b.next_group {
 		return false
 	}
-	for i in 0 ..< len(a.parts) {
-		if a.parts[i] != b.parts[i] {return false}
+	for i in 0 ..< len(a.lyrics) {
+		x, y := a.lyrics[i], b.lyrics[i]
+		x.selected, y.selected = false, false
+		if x != y {return false}
+	}
+	if !slice.equal(a.cuts, b.cuts) || !slice.equal(a.parts, b.parts) {
+		return false
 	}
 	for i in 0 ..< len(a.flags) {
-		if a.flags[i] - {.Selected} != b.flags[i] - {.Selected} {return false} // selection is not history
-	}
-	for i in 0 ..< len(a.cuts) {
-		if a.cuts[i] != b.cuts[i] {return false}
+		if a.flags[i] - {.Selected} != b.flags[i] - {.Selected} {return false}
 	}
 	for i in 0 ..< len(a.clips) {
 		x, y := a.clips[i], b.clips[i]
 		x.selected, y.selected = false, false
-		if x != y {
-			return false
-		}
+		if x != y {return false}
 	}
 	return true
 }
-
 history_reset :: proc() {
 	for s in undo_stack {snapshot_free(s)}
 	for s in redo_stack {snapshot_free(s)}
@@ -82,26 +84,27 @@ history_commit :: proc(busy: bool) {
 }
 
 snapshot_of_temp :: proc() -> Snapshot {
-	return {project.clips[:], project.track_count, project.next_group, project.program[:], project.track_flags[:], project.parts[:]}
+	return {project.clips[:], project.track_count, project.next_group, project.program[:], project.track_flags[:], project.parts[:], project.lyrics[:]}
+}
+
+// Replaces the contents of a list.
+assign :: proc(dst: ^[dynamic]$T, src: []T) {
+	clear(dst)
+	append(dst, ..src)
 }
 
 apply_snapshot :: proc(s: Snapshot) {
-	clear(&project.clips)
-	append(&project.clips, ..s.clips)
-	clear(&project.program)
-	append(&project.program, ..s.cuts)
-	clear(&project.track_flags)
-	append(&project.track_flags, ..s.flags)
-	clear(&project.parts)
-	append(&project.parts, ..s.parts)
+	assign(&project.clips, s.clips)
+	assign(&project.program, s.cuts)
+	assign(&project.track_flags, s.flags)
+	assign(&project.parts, s.parts)
+	assign(&project.lyrics, s.lyrics)
+	for &c in project.clips {c.selected = false}
+	for &l in project.lyrics {l.selected = false}
 	clear_track_selection(&project)
 	clear_cut_sel()
-	for &c in project.clips {
-		c.selected = false
-	}
 	project.track_count, project.next_group = s.track_count, s.next_group
 }
-
 undo :: proc() {
 	if len(undo_stack) == 0 {
 		return

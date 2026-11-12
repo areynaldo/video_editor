@@ -15,24 +15,39 @@ Source :: struct {
 	duration:  f64, // seconds
 	has_video: bool,
 	has_audio: bool,
+	width, height: int, // video size in pixels (0 = unknown)
 }
 
+// Fields are ordered by size (8-byte values, then 4, then 1) so the struct has no padding
+// holes: the clip list is walked and compared every frame.
 Clip :: struct {
-	source:   int, // index into Project.sources
-	kind:     Clip_Kind,
-	track:    int, // layer. higher = on top
+	// where it is on the timeline, and which part of the source it plays
 	start:    f64, // position on timeline, seconds
 	in_point: f64, // offset into source, seconds
 	duration: f64, // seconds on the timeline
 	speed:    f64, // source seconds per timeline second (1 = normal). source span = duration * speed
+	source:   int, // index into Project.sources
+	track:    int, // layer. higher = on top
 	group:    int, // 0 = not linked. clips sharing a group move/split/delete together
-	selected: bool,
 	// transform (video clips). applied after fitting the source into the canvas
 	pos:      [2]f32, // offset from canvas center, in canvas pixels
 	scale:    f32,    // 1 = fit
 	rotation: f32,    // degrees, clockwise
 	gain_db:  f32,    // audio clips: volume in dB (0 = unchanged, <= -60 = silent)
+	kind:     Clip_Kind,
+	fit:      Fit_Mode, // how the picture fills the canvas before scale / position
+	slice:    bool, // made by Randomize (or by the wheel): a piece of footage in a rhythm slot
+	locked:   bool, // a locked slice stays when you randomize again
+	selected: bool,
 }
+// How a video clip fills the output picture (before scale, position and rotation).
+Fit_Mode :: enum u8 {
+	Fit,     // all of it, with the background where the shapes differ
+	Fill,    // the whole canvas, the edges that do not fit are cropped
+	Stretch, // the whole canvas, the picture is distorted to match
+}
+
+FIT_NAMES := [Fit_Mode]cstring{.Fit = "fit (background around)", .Fill = "fill (crop the edges)", .Stretch = "stretch"}
 
 Export_Format :: enum i32 {
 	MP4,
@@ -66,6 +81,13 @@ Settings :: struct {
 	pattern_sel:   i32, // current cutting pattern
 	bpm_lo:        f32, // tempo detection only looks for tempos in this range
 	bpm_hi:        f32,
+	lyric_size:    f32, // lyrics: font height in % of the picture height
+	lyric_burn:    bool, // lyrics: show in the preview and burn into the export
+	lyric_mode:    Lyric_Mode, // lyrics: what is shown at a time
+	lyric_color:   [3]f32, // lyrics: text color
+	lyric_border:  [3]f32, // lyrics: border (outline) color
+	lyric_border_w: f32, // lyrics: border width in % of the font size
+	lyric_font:    [64]u8, // lyrics: font file name in C:\Windows\Fonts
 }
 
 Grid_Type :: enum i32 {
@@ -109,6 +131,7 @@ Project :: struct {
 	track_flags: [dynamic]Track_Flags, // per track; kept as long as track_count (sync_tracks)
 	patterns:    [dynamic]Pattern, // cutting patterns, see patterns.odin
 	parts:       [dynamic]Part, // time ranges with their own pattern
+	lyrics:      [dynamic]Lyric, // timed text lines, see lyrics.odin
 }
 
 Track_Flag :: enum u8 {
@@ -161,6 +184,7 @@ project_reset :: proc(p: ^Project) {
 	delete(p.track_flags)
 	delete(p.patterns)
 	delete(p.parts)
+	delete(p.lyrics)
 	p^ = {}
 	p.settings = {
 		fps    = 30,
@@ -175,9 +199,14 @@ project_reset :: proc(p: ^Project) {
 		bg = {0, 0, 0},
 		bpm_lo = 80,
 		bpm_hi = 180,
+		lyric_size = 6,
+		lyric_burn = true,
+		lyric_color = {1, 1, 1},
+		lyric_border_w = 7,
 		rand = {footage = .Same_Time, slice = .Cuts, pattern = -1, max_run = 1},
 	}
 	set_name(&p.settings, "untitled")
+	set_fixed(p.settings.lyric_font[:], "arial.ttf")
 }
 
 set_name :: proc(s: ^Settings, name: string) {
@@ -268,7 +297,7 @@ split_at :: proc(p: ^Project, t: f64) {
 		if track_has(p^, p.clips[i].track, .Locked) {
 			continue
 		}
-		if any_selected && !p.clips[i].selected {
+		if p.clips[i].locked || (any_selected && !p.clips[i].selected) {
 			continue
 		}
 		r := split_clip(p, i, t)
@@ -366,7 +395,7 @@ unlink_selected :: proc(p: ^Project) {
 
 remove_selected :: proc(p: ^Project) {
 	#reverse for c, i in p.clips {
-		if c.selected {
+		if c.selected && !c.locked {
 			ordered_remove(&p.clips, i)
 		}
 	}
@@ -542,4 +571,11 @@ Rand_Options :: struct {
 Part :: struct {
 	t0, t1:  f64,
 	pattern: i32, // index into Project.patterns, -1 = none
+}
+
+any_selected :: proc() -> bool {
+	for c in project.clips {
+		if c.selected {return true}
+	}
+	return false
 }

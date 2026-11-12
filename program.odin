@@ -173,3 +173,43 @@ visible_intervals :: proc(p: Project, track: int, end: f64) -> (iv: []Interval, 
 	}
 	return out[:], false
 }
+
+// Cut on the grid inside the selected segment, or the whole project.
+beat_split :: proc() {
+	s := project.settings
+	step, _ := grid_step(s)
+	from, to := 0.0, project_length(project)
+	if t0, t1, ok := program_range(); ok {
+		from, to = t0, t1
+	}
+	program_split_grid(&project, from, to, step * f64(max(s.cut_every, 1)), grid_origin(s))
+	clear_cut_sel()
+}
+
+// Show the n-th (0-based) video layer. While playing: from the playhead on (a cut
+// is made there, snapped to the grid). Otherwise: on the selected segment, or the
+// one under the playhead.
+show_layer :: proc(n: int) {
+	layers := video_layers(project)
+	if n >= len(layers) {
+		set_status("there is no video layer %d", n + 1)
+		return
+	}
+	if !playing && sel_cut >= 0 { // the whole selected range
+		for k in sel_cut ..= min(sel_cut2, len(project.program) - 1) {
+			project.program[k].layer, project.program[k].fixed = layers[n], true
+		}
+		return
+	}
+	i: int
+	if playing {
+		i = cut_insert(&project, snap(playhead))
+	} else {
+		i = segment_at(project, playhead)
+		if i < 0 {
+			i = cut_insert(&project, snap(playhead))
+		}
+	}
+	project.program[i].layer, project.program[i].fixed = layers[n], true // a layer picked by hand is kept by Randomize
+	select_cuts(i, i)
+}

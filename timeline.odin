@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:math"
 import "core:path/filepath"
 import "core:slice"
+import "core:strings"
 
 import im "deps/odin-imgui"
 
@@ -12,7 +13,9 @@ RULER_H :: 20
 PART_H :: 16 // the parts row under the ruler
 PROG_Y :: RULER_H + PART_H
 PROG_H :: 26 // the program lane under the parts row
-LANES_Y :: PROG_Y + PROG_H
+LYR_Y :: PROG_Y + PROG_H // the lyrics row under the program lane
+LYR_H :: 16
+LANES_Y :: LYR_Y + LYR_H
 EDGE_PX :: 6 // grab zone for trimming
 HEADER_W :: 124 // track header column, stays at the left while scrolling
 
@@ -34,6 +37,11 @@ Drag :: enum {
 	Cut_Move, // dragging a program cut
 	Prog_Range, // dragging over program segments to select a range
 	Part_Create, // dragging out a part in the parts row
+	Lyric_Move, // dragging a lyric line, or one of its edges
+	Lyric_Trim_L,
+	Lyric_Trim_R,
+	Lyric_Box, // dragging a box over lyric lines to select them
+	Box, // dragging a box over the lanes to select clips
 	Pan, // hand tool
 }
 
@@ -45,6 +53,9 @@ drag_seg: int // the segment a range selection started at
 loop_playback: bool // loop the selected program range while playing
 
 sel_part := -1 // selected part
+box_y0: f32 // screen y where a box selection started
+box_base: [dynamic]bool // what was selected before a ctrl box (clips or lyric lines)
+prev_scroll_y: f32 // the timeline's vertical scroll before the wheel acted on a slice
 part_drag_t: f64 // the free end of a part being dragged out
 
 select_cuts :: proc(a, b: int) {
@@ -52,9 +63,45 @@ select_cuts :: proc(a, b: int) {
 	sel_part = -1
 }
 
+// Clears every selection kind that is not a clip or a layer: program range, part, lyric line.
 clear_cut_sel :: proc() {
 	sel_cut, sel_cut2 = -1, -1
 	sel_part = -1
+	lyrics_deselect()
+}
+
+// Nothing selected anywhere: clips, layers, program range, part, lyric line.
+select_none :: proc() {
+	clear_selection(&project)
+	clear_track_selection(&project)
+	clear_cut_sel()
+}
+
+// The color of a pattern in the parts row and in the brush strip (grey = none).
+pattern_color :: proc(pattern: i32) -> u32 {
+	r, g, b: f32
+	im.ColorConvertHSVtoRGB(pattern >= 0 ? math.mod(f32(pattern) * 0.27 + 0.1, 1) : 0, pattern >= 0 ? 0.5 : 0, 0.55, &r, &g, &b)
+	return im.ColorConvertFloat4ToU32({r, g, b, 1})
+}
+
+// One chip for each pattern: the current one is the brush for the parts row.
+brush_strip :: proc() {
+	im.TextDisabled("brush")
+	for i in 0 ..< len(project.patterns) {
+		im.SameLine()
+		im.PushStyleColor(.Button, pattern_color(i32(i)))
+		im.PushStyleColor(.ButtonHovered, pattern_color(i32(i)) | 0x00303030)
+		picked := i == int(project.settings.pattern_sel)
+		if picked {im.PushStyleColor(.Border, 0xFFFFFFFF)}
+		im.PushStyleVar(.FrameBorderSize, picked ? 2 : 0)
+		if im.Button(cstr(fmt.tprintf("%s###brush%d", get_fixed(project.patterns[i].name[:]), i))) {
+			project.settings.pattern_sel = i32(i)
+		}
+		im.PopStyleVar()
+		if picked {im.PopStyleColor()}
+		im.PopStyleColor(2)
+		tip("Brush: drag in the parts row to paint it. Ctrl+click a part to repaint it.")
+	}
 }
 
 // The part that contains time t, or -1.
@@ -184,13 +231,6 @@ zoom_at :: proc(origin, scroll_x, mouse_x: f32, factor: f32) {
 	im.SetScrollX(max(origin + scroll_x - mouse_x + f32(t) * zoom, 0))
 }
 
-toolbar_button :: proc(a: Action, name: string) {
-	if im.Button(labeled(a, name)) {
-		do_action(a)
-	}
-	im.SameLine()
-}
-
 // ---------------------------------------------------------------- panel
 
 panel_timeline :: proc() {
@@ -215,7 +255,11 @@ panel_timeline :: proc() {
 	im.SameLine()
 	if icon_button("##remlayer", .Minus, 24, false, "Remove the selected layer (click its header)") {do_action(.Remove_Layer)}
 	im.SameLine()
-	im.TextDisabled(loop_playback ? "F1: commands   [looping the selected range]" : "F1: commands")
+	im.TextDisabled(loop_playback ? "F1: commands  [looping]" : "F1: commands")
+	if len(project.patterns) > 0 {
+		im.SameLine()
+		brush_strip()
+	}
 
 	// tools on the left, timeline canvas fills the rest
 	im.BeginChild("tools", {44, 0}, {}, {.NoScrollbar})
@@ -291,7 +335,7 @@ timeline :: proc() {
 		case .Zoom:  im.SetMouseCursor(.ResizeAll)
 		}
 	}
-	if canvas_hovered && mouse.y > p0.y + PROG_Y && mouse.y < p0.y + LANES_Y && cut_near(p0.x, mouse.x) >= 0 {
+	if canvas_hovered && mouse.y > p0.y + PROG_Y && mouse.y < p0.y + LYR_Y && cut_near(p0.x, mouse.x) >= 0 {
 		im.SetMouseCursor(.ResizeEW)
 	}
 
@@ -299,6 +343,27 @@ timeline :: proc() {
 	if im.IsWindowHovered() {
 		if io.KeyCtrl && io.MouseWheel != 0 {
 			zoom_at(p0.x, sx, mouse.x, io.MouseWheel > 0 ? 1.25 : 0.8)
+		}
+		// the wheel on a slice switches its footage (and locks it)
+		if hover >= 0 && !io.KeyCtrl && io.MouseWheel != 0 && project.clips[hover].slice {
+			dir := io.MouseWheel < 0 ? 1 : -1
+			// every selected slice changes together when the wheel is over a selected one
+			n := 0
+			if project.clips[hover].selected {
+				for i in 0 ..< len(project.clips) {
+					if project.clips[i].selected && slice_nudge(&project, i, dir, project.settings.rand.footage) {n += 1}
+				}
+			} else if slice_nudge(&project, hover, dir, project.settings.rand.footage) {
+				n = 1
+			}
+			if n > 0 {
+				set_status("%d slice%s: %s footage, locked", n, n == 1 ? "" : "s", dir > 0 ? "next" : "previous")
+			} else {
+				set_status("no other footage for this slice")
+			}
+			im.SetScrollY(prev_scroll_y) // the wheel is not a scroll here
+		} else {
+			prev_scroll_y = im.GetScrollY()
 		}
 		if im.IsMouseDragging(.Middle) {
 			im.SetScrollX(sx - io.MouseDelta.x)
@@ -312,13 +377,11 @@ timeline :: proc() {
 		case mouse.y < p0.y + RULER_H:
 		case mouse.y < p0.y + PROG_Y: // parts row
 			if hit := part_at(t_mouse); hit >= 0 {
-				clear_selection(&project)
-				clear_track_selection(&project)
-				clear_cut_sel()
+				select_none()
 				sel_part = hit
 				open_context(.Part, t_mouse, -1)
 			}
-		case mouse.y < p0.y + LANES_Y:
+		case mouse.y < p0.y + LYR_Y:
 			if seg := segment_at(project, t_mouse); seg >= 0 {
 				clear_selection(&project)
 				clear_track_selection(&project)
@@ -327,6 +390,14 @@ timeline :: proc() {
 				}
 				open_context(.Segment, t_mouse, -1)
 			}
+		case mouse.y < p0.y + LANES_Y: // lyrics row
+			clear_selection(&project)
+			clear_track_selection(&project)
+			if h := lyric_hit(project, t_mouse); h >= 0 {
+				if !project.lyrics[h].selected {lyrics_deselect(); lyric_select(h, false, false)}
+				sel_lyric = h
+			}
+			open_context(.Lyric, t_mouse, -1)
 		case hover >= 0:
 			if !project.clips[hover].selected {
 				clear_selection(&project)
@@ -352,16 +423,15 @@ timeline :: proc() {
 			drag = .Scrub
 		case mouse.y < p0.y + PROG_Y:
 			// parts row: click a part to select it, drag on empty space to make one
-			clear_selection(&project)
-			clear_track_selection(&project)
-			clear_cut_sel()
+			select_none()
 			if hit := part_at(t_mouse); hit >= 0 {
 				sel_part = hit
 				drag = .None
+				if io.KeyCtrl && len(project.patterns) > 0 {project.parts[hit].pattern = project.settings.pattern_sel} // repaint
 			} else {
 				drag, drag_ref, part_drag_t = .Part_Create, snap(max(0, t_mouse)), snap(max(0, t_mouse))
 			}
-		case mouse.y < p0.y + LANES_Y:
+		case mouse.y < p0.y + LYR_Y:
 			// program lane: grab a cut to resize its segments, or select a segment
 			clear_selection(&project)
 			clear_track_selection(&project)
@@ -382,6 +452,29 @@ timeline :: proc() {
 				clear_cut_sel()
 				drag = .None
 			}
+		case mouse.y < p0.y + LANES_Y:
+			// lyrics row: click selects a line, drag moves it, drag an edge trims it
+			clear_selection(&project)
+			clear_track_selection(&project)
+			sel_cut, sel_cut2, sel_part = -1, -1, -1
+			if i := lyric_hit(project, t_mouse); i >= 0 {
+				lyric_select(i, io.KeyCtrl, io.KeyShift)
+				lyr_tap = i + 1
+				l := project.lyrics[i]
+				drag, drag_cut, drag_press_t, drag_ref = .Lyric_Move, i, t_mouse, l.t0
+				if io.KeyCtrl || io.KeyShift {
+					drag = .None // a click that changes the selection does not move anything
+				} else if mouse.x < time_to_x(p0.x, l.t0) + EDGE_PX {
+					drag = .Lyric_Trim_L
+				} else if mouse.x > time_to_x(p0.x, l.t1) - EDGE_PX {
+					drag, drag_ref = .Lyric_Trim_R, l.t1
+				}
+			} else { // empty space: drag a box to select lines
+				clear(&box_base)
+				for l in project.lyrics {append(&box_base, io.KeyCtrl && l.selected)}
+				if !io.KeyCtrl {lyrics_deselect()}
+				drag, drag_ref, part_drag_t = .Lyric_Box, t_mouse, t_mouse
+			}
 		case tool == .Hand:
 			drag = .Pan
 		case tool == .Zoom:
@@ -399,7 +492,7 @@ timeline :: proc() {
 				clear_selection(&project)
 			}
 		case hover >= 0:
-			drag = zone_at(p0.x, mouse.x, hover)
+			drag = project.clips[hover].locked ? .None : zone_at(p0.x, mouse.x, hover) // a locked clip can be selected, not changed
 			if io.KeyCtrl {
 				set_selected(&project, hover, !project.clips[hover].selected)
 			} else if !project.clips[hover].selected || drag != .Move {
@@ -414,7 +507,9 @@ timeline :: proc() {
 			clear_cut_sel()
 			if !io.KeyCtrl {clear_track_selection(&project)}
 		case:
-			// empty lane space: pick the layer (ctrl: toggle, shift: range), move the checkpoint
+			// empty lane space: pick the layer (ctrl: toggle, shift: range), move the checkpoint; dragging makes a box
+			clear(&box_base)
+			for c in project.clips {append(&box_base, io.KeyCtrl && c.selected)}
 			if mouse.y < p0.y + LANES_Y + f32(project.track_count) * TRACK_H {
 				select_track(track, io.KeyCtrl, io.KeyShift)
 			} else {
@@ -423,7 +518,7 @@ timeline :: proc() {
 			}
 			checkpoint = snap(max(0, t_mouse))
 			clear_cut_sel()
-			drag = .None
+			drag, drag_ref, part_drag_t, box_y0 = .Box, t_mouse, t_mouse, mouse.y
 		}
 	}
 
@@ -433,6 +528,7 @@ timeline :: proc() {
 			if drag == .Part_Create {
 				make_part(min(drag_ref, part_drag_t), max(drag_ref, part_drag_t))
 			}
+			if drag == .Lyric_Move || drag == .Lyric_Trim_L || drag == .Lyric_Trim_R {lyrics_sort(&project)}
 			drag = .None
 		} else {
 			// where the grabbed edge / clip start wants to be (grid-snapped unless alt is held)
@@ -455,6 +551,25 @@ timeline :: proc() {
 				playing = false
 			case .Part_Create:
 				part_drag_t = snap(max(0, t_mouse))
+			case .Lyric_Move: // the whole selection moves with the line you hold
+				if drag_cut < len(project.lyrics) {lyrics_shift(target - project.lyrics[drag_cut].t0)}
+			case .Lyric_Trim_L, .Lyric_Trim_R:
+				if drag_cut < len(project.lyrics) {
+					l := &project.lyrics[drag_cut]
+					if drag == .Lyric_Trim_L {l.t0 = clamp(target, 0, l.t1 - MIN_DURATION)} else {l.t1 = max(target, l.t0 + MIN_DURATION)}
+				}
+			case .Lyric_Box:
+				part_drag_t = t_mouse
+				lo, hi := min(drag_ref, part_drag_t), max(drag_ref, part_drag_t)
+				for &l, i in project.lyrics {l.selected = (i < len(box_base) && box_base[i]) || (l.t0 < hi && l.t1 > lo)}
+			case .Box: // a box over the lanes selects the clips it touches
+				part_drag_t = t_mouse
+				lo, hi := min(drag_ref, part_drag_t), max(drag_ref, part_drag_t)
+				ta, tb := y_to_track(p0.y, box_y0), y_to_track(p0.y, mouse.y)
+				for &c, i in project.clips {
+					hit := c.track >= min(ta, tb) && c.track <= max(ta, tb) && c.start < hi && clip_end(c) > lo && !track_has(project, c.track, .Locked)
+					c.selected = (i < len(box_base) && box_base[i]) || hit
+				}
 			case .Prog_Range:
 				select_cuts(drag_seg, max(segment_at(project, t_mouse), 0))
 			case .Cut_Move:
@@ -552,9 +667,7 @@ timeline :: proc() {
 		for part, i in project.parts {
 			a := im.Vec2{time_to_x(p0.x, part.t0), py + 1}
 			b := im.Vec2{time_to_x(p0.x, part.t1), py + PART_H - 2}
-			r, g, bl: f32
-			im.ColorConvertHSVtoRGB(part.pattern >= 0 ? math.mod(f32(part.pattern) * 0.27 + 0.1, 1) : 0, part.pattern >= 0 ? 0.5 : 0, 0.55, &r, &g, &bl)
-			im.DrawList_AddRectFilled(dl, a, b, im.ColorConvertFloat4ToU32({r, g, bl, 1}))
+			im.DrawList_AddRectFilled(dl, a, b, pattern_color(part.pattern))
 			im.DrawList_AddRect(dl, a, b, i == sel_part ? 0xFFFFFFFF : 0xFF000000)
 			name := part.pattern >= 0 && int(part.pattern) < len(project.patterns) ? get_fixed(project.patterns[part.pattern].name[:]) : "no pattern"
 			im.DrawList_PushClipRect(dl, a, b, true)
@@ -593,13 +706,36 @@ timeline :: proc() {
 		}
 	}
 
+	// Lyrics row: subtitle lines. Drag to move, drag an edge to trim.
+	{
+		y0 := p0.y + LYR_Y
+		im.DrawList_AddRectFilled(dl, {p0.x, y0}, {p0.x + size.x, y0 + LYR_H - 1}, 0xFF1B1B1B)
+		for i in 0 ..< len(project.lyrics) {
+			l := project.lyrics[i]
+			a := im.Vec2{time_to_x(p0.x, l.t0), y0 + 1}
+			b := im.Vec2{time_to_x(p0.x, l.t1), y0 + LYR_H - 2}
+			if b.x < win_pos.x || a.x > win_pos.x + win_size.x {continue}
+			im.DrawList_AddRectFilled(dl, a, b, 0xFF7A5A2A)
+			im.DrawList_AddRect(dl, a, b, l.selected || i == sel_lyric ? 0xFFFFFFFF : 0xFF000000, 0, l.selected ? 2 : 1)
+			text, _ := strings.replace_all(text_of(l), "\n", " / ", context.temp_allocator)
+			im.DrawList_PushClipRect(dl, a, b, true)
+			im.DrawList_AddText(dl, {a.x + 4, a.y}, 0xFFFFFFFF, cstr(text))
+			im.DrawList_PopClipRect(dl)
+		}
+	}
+
 	// Clips
 	for c in project.clips {
 		y := track_to_y(p0.y, c.track)
 		a := im.Vec2{time_to_x(p0.x, c.start), y + 2}
 		b := im.Vec2{time_to_x(p0.x, clip_end(c)), y + TRACK_H - 3}
+		if b.x < win_pos.x || a.x > win_pos.x + win_size.x {continue} // off screen
 		im.DrawList_AddRectFilled(dl, a, b, clip_color(c))
-		im.DrawList_AddRect(dl, a, b, c.selected ? 0xFFFFFFFF : 0xFF000000)
+		im.DrawList_AddRect(dl, a, b, c.selected ? 0xFFFFFFFF : (c.locked ? 0xFF30D0FF : 0xFF000000), 0, c.locked ? 2 : 1)
+		if c.locked && b.x - a.x > 20 { // padlock
+			im.DrawList_AddRect(dl, {b.x - 13, a.y + 4}, {b.x - 7, a.y + 10}, 0xFF30D0FF)
+			im.DrawList_AddRectFilled(dl, {b.x - 15, a.y + 8}, {b.x - 5, a.y + 16}, 0xFF30D0FF)
+		}
 		if c.kind == .Audio { 	// waveform, scaled by the clip's volume
 			mid, half := (a.y + b.y) / 2, (b.y - a.y) / 2 - 3
 			gain := db_to_gain(c.gain_db)
@@ -618,6 +754,15 @@ timeline :: proc() {
 		im.DrawList_PushClipRect(dl, a, b, true)
 		im.DrawList_AddText(dl, {a.x + 4, a.y + 4}, 0xFFFFFFFF, cstr(filepath.base(project.sources[c.source].path)))
 		im.DrawList_PopClipRect(dl)
+	}
+
+	// a box being dragged: lines or clips it selects
+	if drag == .Lyric_Box || drag == .Box {
+		x0, x1 := time_to_x(p0.x, min(drag_ref, part_drag_t)), time_to_x(p0.x, max(drag_ref, part_drag_t))
+		y0, y1 := p0.y + LYR_Y, p0.y + LANES_Y
+		if drag == .Box {y0, y1 = min(box_y0, mouse.y), max(box_y0, mouse.y)}
+		im.DrawList_AddRectFilled(dl, {x0, y0}, {x1, y1}, 0x30FFFFFF)
+		im.DrawList_AddRect(dl, {x0, y0}, {x1, y1}, 0xC0FFFFFF)
 	}
 
 	// locked lanes are dimmed
@@ -653,6 +798,7 @@ draw_track_headers :: proc(dl: ^im.DrawList, p0: im.Vec2, sx, height: f32, rows:
 	im.DrawList_AddText(dl, {hl + 8, p0.y + 3}, 0xFFFFFFFF, cstr(fmt.tprintf("%d fps", project.settings.fps)))
 	im.DrawList_AddText(dl, {hl + 8, p0.y + RULER_H + 1}, 0xFFB0B0B0, "Parts")
 	im.DrawList_AddText(dl, {hl + 8, p0.y + PROG_Y + 5}, 0xFFFFFFFF, "Program")
+	im.DrawList_AddText(dl, {hl + 8, p0.y + LYR_Y + 1}, 0xFFB0B0B0, "Lyrics")
 
 	mouse := im.GetMousePos()
 	click := im.IsWindowHovered() && im.IsMouseClicked(.Left)

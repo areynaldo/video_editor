@@ -48,6 +48,7 @@ delete = delete, backspace
 remove_audio = shift+delete
 link = l
 unlink = u
+lock = k           # selected clips, else selected layers. Randomize keeps locked slices
 undo = ctrl+z
 redo = ctrl+shift+z, ctrl+y
 select_all = ctrl+a
@@ -65,6 +66,10 @@ remove_layer = minus
 stretch = shift   # hold while dragging a clip edge
 no_snap = alt     # hold while dragging or scrubbing to ignore the grid
 toggle_grid = g
+
+[lyrics]    # type the text in the Lyrics window; tap the start of each line while the song plays
+lyric_tap = y
+lyrics_panel = shift+y
 
 [tools]         # premiere style
 tool_select = v

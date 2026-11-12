@@ -5,3 +5,12 @@ out.mp4
 imgui.ini
 keybindings.ini
 keybindings.ini.old
+
+cache/
+whisper.txt
+lyrics_align*
+tools/
+lyrics_align_heard.wav
+lyrics_align_*
+lyrics_solo_bebo.txt
+last_job_error.txt

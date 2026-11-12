@@ -4,8 +4,6 @@ import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:os"
-import "core:slice"
-import "core:path/filepath"
 import "core:strings"
 
 import im "deps/odin-imgui"
@@ -15,6 +13,7 @@ import gl "vendor:OpenGL"
 import "vendor:glfw"
 
 PROJECT_EXT :: ".vproj"
+PROJECT_FILTER :: "Project|*" + PROJECT_EXT + "|All files|*.*"
 MEDIA_FILTER :: "Media|*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.mp3;*.wav;*.flac;*.m4a;*.ogg|All files|*.*"
 
 project: Project
@@ -48,13 +47,6 @@ on_drop :: proc "c" (_: glfw.WindowHandle, count: i32, paths: [^]cstring) {
 	}
 }
 
-with_ext :: proc(path, ext: string) -> string {
-	if filepath.ext(path) == "" {
-		return strings.concatenate({path, ext})
-	}
-	return path
-}
-
 do_new :: proc() {
 	preview_reset()
 	project_reset(&project)
@@ -65,45 +57,35 @@ do_new :: proc() {
 }
 
 do_open :: proc() {
-	paths := file_dialog(false, "Open project", "Project|*" + PROJECT_EXT + "|All files|*.*")
-	if len(paths) == 0 {
-		return
-	}
+	path, ok := pick_file(false, "Open project", PROJECT_FILTER)
+	if !ok {return}
 	preview_reset()
-	if err := load_project(&project, paths[0]); err != "" {
+	if err := load_project(&project, path); err != "" {
 		set_status("%s", err)
 		return
 	}
-	project_path = strings.clone(paths[0])
+	project_path = strings.clone(path)
 	playhead = 0
 	history_reset()
-	set_status("opened %s", paths[0])
+	set_status("opened %s", path)
 }
 
 do_save :: proc() {
 	if project_path == "" {
-		name := fmt.tprintf("%s%s", settings_name(&project.settings), PROJECT_EXT)
-		paths := file_dialog(true, "Save project", "Project|*" + PROJECT_EXT + "|All files|*.*", name)
-		if len(paths) == 0 {
-			return
-		}
-		project_path = strings.clone(with_ext(paths[0], PROJECT_EXT))
+		path, ok := pick_file(true, "Save project", PROJECT_FILTER, fmt.tprintf("%s%s", settings_name(&project.settings), PROJECT_EXT), PROJECT_EXT)
+		if !ok {return}
+		project_path = strings.clone(path)
 	}
 	set_status(save_project(project, project_path) ? "saved %s" : "could not save %s", project_path)
 }
 
 do_export :: proc() {
 	ext := FORMAT_EXT[project.settings.format]
-	name := fmt.tprintf("%s.%s", settings_name(&project.settings), ext)
-	paths := file_dialog(true, "Export", fmt.tprintf("%s|*.%s|All files|*.*", ext, ext), name)
-	if len(paths) == 0 {
-		return
-	}
-	path := with_ext(paths[0], strings.concatenate({".", ext}, context.temp_allocator))
+	path, ok := pick_file(true, "Export", fmt.tprintf("%s|*.%s|All files|*.*", ext, ext), fmt.tprintf("%s.%s", settings_name(&project.settings), ext), strings.concatenate({".", ext}, context.temp_allocator))
+	if !ok {return}
 	set_status("exporting %s ...", path)
 	set_status(export(project, path) ? "exported %s" : "export failed (see console): %s", path)
 }
-
 do_action :: proc(a: Action) {
 	switch a {
 	case .New_Project:  do_new()
@@ -124,6 +106,11 @@ do_action :: proc(a: Action) {
 		if any_selected() {duplicate_selected(&project)} else {duplicate_selected_tracks(&project)}
 	case .Delete: // a part, a program cut, else clips, else layers
 		switch {
+		case lyrics_selected() > 0: // the selected lyric lines
+			#reverse for l, i in project.lyrics {
+				if l.selected {ordered_remove(&project.lyrics, i)}
+			}
+			sel_lyric = -1
 		case sel_part >= 0 && sel_part < len(project.parts):
 			ordered_remove(&project.parts, sel_part)
 			sel_part = -1
@@ -144,6 +131,7 @@ do_action :: proc(a: Action) {
 	case .Remove_Audio_Layers, .Remove_Video_Layers:
 		n := remove_layers_of_kind(&project, a == .Remove_Video_Layers ? .Video : .Audio)
 		set_status("removed %d %s layer%s", n, a == .Remove_Video_Layers ? "video" : "audio", n == 1 ? "" : "s")
+	case .Background_Color: bg_popup_open = true
 	case .Select_All:
 		clear_track_selection(&project)
 		for &c in project.clips {
@@ -190,6 +178,50 @@ do_action :: proc(a: Action) {
 		select_cuts(i, i)
 	case .Beat_Split: beat_split()
 	case .Randomize:  run_randomize()
+	case .Smooth_Slowmo:
+		open_slowmo_dialog(false)
+	case .Enhance_Clips: prerender(&project, .Enhance)
+	case .Slowmo_Enhance: open_slowmo_dialog(true)
+	case .Lyrics_Panel: show_lyrics = true
+	case .Lyric_Add:    lyric_add(&project, playhead)
+	case .Lyric_Tap:    lyric_tap()
+	case .Lyrics_Open:
+		if path, ok := pick_file(false, "Open lyrics", "Lyrics|*.srt;*.lrc;*.txt|All files|*.*"); ok {
+			show_lyrics = true
+			set_status(lyrics_import(&project, path) ? "%d lyric lines" : "no lyrics found in %s", len(project.lyrics), path)
+		}
+	case .Lyrics_Transcribe:
+		show_lyrics = true
+		lyrics_align(true)
+	case .Lyrics_Align:
+		show_lyrics = true
+		lyrics_align()
+	case .Lyrics_Export:
+		if len(project.lyrics) == 0 {
+			set_status("no lyrics to export")
+		} else if path, ok := pick_file(true, "Export lyrics", "SubRip|*.srt|LRC|*.lrc|ASS|*.ass|Text|*.txt", fmt.tprintf("%s.srt", settings_name(&project.settings))); ok {
+			set_status(lyrics_export(project, path) ? "exported %s" : "could not write %s", path)
+		}
+	case .Lock:
+		// the selected clips, else the selected layers; all locked already -> unlock
+		all, n := true, 0
+		for c in project.clips {
+			if c.selected {
+				n += 1
+				all &&= c.locked
+			}
+		}
+		if n > 0 {
+			for &c in project.clips {
+				if c.selected {c.locked = !all}
+			}
+			set_status("%d clip%s %s", n, n == 1 ? "" : "s", all ? "unlocked" : "locked")
+		} else if len(selected_tracks(project)) > 0 {
+			toggle_flag_on_selected(&project, .Locked)
+			set_status("layers locked / unlocked")
+		} else {
+			set_status("select clips or layers to lock")
+		}
 	case .Randomize_Options: show_randomize = true
 	case .Apply_Pattern:  apply_pattern()
 	case .Pattern_Editor: show_patterns = true
@@ -248,227 +280,6 @@ do_action :: proc(a: Action) {
 	}
 }
 
-// Randomize: fill the slots of a rhythm with slices of footage on a new layer (see
-// rearrange.odin). The slicing comes from Rand_Options.slice: the program's cuts, the
-// pattern (each part's own pattern if the project has parts), or the grid. A selected
-// program range limits it to that range.
-run_randomize :: proc() {
-	s := project.settings
-	step, _ := grid_step(s)
-	spacing, origin := step * f64(max(s.cut_every, 1)), grid_origin(s)
-	cands := rearrange_candidates(project)
-	if len(cands) == 0 {
-		set_status("no video clips to randomize")
-		return
-	}
-	lo, hi := candidate_span(project, cands)
-	t0, t1, ranged := program_range()
-	if ranged {lo, hi = t0, t1}
-	total := 0.0
-	for ci in cands {total += project.clips[ci].duration}
-	use_all := s.rand.use_all && s.rand.footage != .Same_Time
-	// the slicing times; with "use all" they run on (the rhythm loops) until the footage would be used up
-	horizon := use_all ? lo + (hi - lo) + total : hi
-
-	times := make([dynamic]f64, context.temp_allocator)
-	pins := make([dynamic]int, context.temp_allocator)
-	switch s.rand.slice {
-	case .Pattern:
-		if len(project.parts) > 0 {
-			parts_slots(project, lo, horizon, &times, &pins)
-		} else {
-			pat: ^Pattern
-			if i := int(s.rand.pattern); i >= 0 && i < len(project.patterns) {
-				pat = &project.patterns[i]
-			} else {
-				pat = cur_pattern()
-			}
-			if pat != nil {pattern_slots(project, pat^, lo, horizon, &times, &pins)}
-		}
-	case .Cuts:
-		for c in project.program {
-			if c.time >= lo - CUT_EPS && c.time <= hi + CUT_EPS {
-				append(&times, c.time)
-				append(&pins, c.fixed && c.layer >= 0 ? c.layer : PIN_NONE) // a layer a pattern lane or you set stays
-			}
-		}
-		if n := len(times); n >= 2 && use_all {
-			period := times[n - 1] - times[0]
-			for k := 1; times[0] + f64(k) * period < horizon; k += 1 { // loop the cuts
-				for i in 1 ..< n {
-					append(&times, times[i] + f64(k) * period)
-					append(&pins, pins[i])
-				}
-			}
-		}
-	case .Grid:
-	}
-	if len(times) < 2 { // no rhythm to use: the grid
-		clear(&times)
-		clear(&pins)
-		for k := int(math.ceil((lo - origin) / spacing - 1e-6)); origin + f64(k) * spacing <= horizon + spacing; k += 1 {
-			append(&times, origin + f64(k) * spacing)
-		}
-	}
-
-	res := rearrange(&project, s.rand, cands, times[:], pins[:], lo, hi)
-	if res.cells == 0 {
-		set_status("nothing to randomize: the clips do not cover a slot")
-		return
-	}
-	// the old cuts described the source clips, not this layer: mark its slots instead
-	end := hi
-	if n := len(res.bounds); n > 0 {end = max(end, res.bounds[n - 1] + 2 * CUT_EPS)}
-	if ranged {
-		#reverse for c, i in project.program {
-			if c.time >= lo - CUT_EPS && c.time < end {cut_remove(&project, i)}
-		}
-	} else {
-		clear(&project.program)
-	}
-	for t in res.bounds {
-		i := cut_insert(&project, t)
-		project.program[i].layer, project.program[i].fixed = -1, false // -1: the top layer shows, and that is the new one
-	}
-	clear_cut_sel()
-	set_status("randomized: %d slices in %d clips on a new layer%s", res.cells, res.clips, res.empty > 0 ? fmt.tprintf(" (%d empty slots)", res.empty) : "")
-}
-
-// What the tempo detection found, in timeline terms (see detect_project_bpm).
-Bpm_Candidate :: struct {
-	bpm:        f64,
-	first_beat: f64, // timeline seconds
-	confidence: f32,
-}
-
-bpm_cands: [BPM_CANDS]Bpm_Candidate
-bpm_cand_n: int
-bpm_cand_active := -1
-bpm_src_clip := -1 // audio clip chosen in the Sequence panel; -1 = automatic
-tap_times: [dynamic]f64
-
-audio_clip_ok :: proc(i: int) -> bool {
-	if i < 0 || i >= len(project.clips) {return false}
-	c := project.clips[i]
-	return c.kind == .Audio && c.source < len(audios) && audios[c.source] != nil
-}
-
-// Which audio clip to analyse: the one picked in the panel, else the selected one,
-// else one on a selected layer, else the first.
-bpm_source_clip :: proc() -> int {
-	if audio_clip_ok(bpm_src_clip) {
-		return bpm_src_clip
-	}
-	sel_clip, on_layer, first_clip := -1, -1, -1
-	layers := selected_tracks(project)
-	for c, i in project.clips {
-		if !audio_clip_ok(i) {continue}
-		if c.selected && sel_clip < 0 {sel_clip = i}
-		if on_layer < 0 && slice.contains(layers, c.track) {on_layer = i}
-		if first_clip < 0 {first_clip = i}
-	}
-	return sel_clip >= 0 ? sel_clip : (on_layer >= 0 ? on_layer : first_clip)
-}
-
-use_bpm_candidate :: proc(i: int) {
-	if i < 0 || i >= bpm_cand_n {return}
-	c := bpm_cands[i]
-	s := &project.settings
-	s.bpm, s.grid_offset = f32(c.bpm), c.first_beat
-	s.grid_type, s.grid_on = .Beats, true
-	bpm_cand_active = i
-}
-
-// Detects the tempo of the audio clip (see bpm_source_clip) and sets the beat grid
-// from the best candidate. The other candidates stay in the Sequence panel to pick.
-detect_project_bpm :: proc() {
-	pick := bpm_source_clip()
-	if pick < 0 {
-		set_status("no audio clip to analyse")
-		return
-	}
-	c := project.clips[pick]
-	s := &project.settings
-	cands, n, win0, ok := detect_bpm(audios[c.source], c.in_point, c.in_point + c.duration * c.speed, f64(s.bpm_lo), f64(s.bpm_hi))
-	if !ok {
-		set_status("need at least %.0f s of decoded audio in that clip (still decoding?)", BPM_MIN_SECONDS)
-		return
-	}
-	for i in 0 ..< n {
-		bpm_cands[i] = {cands[i].bpm / c.speed, c.start + ((win0 + cands[i].offset) - c.in_point) / c.speed, cands[i].confidence}
-	}
-	bpm_cand_n = n
-	use_bpm_candidate(0)
-	set_status("%s: %.1f bpm%s", filepath.base(project.sources[c.source].path), s.bpm, n > 1 ? " (other candidates in Sequence)" : "")
-}
-
-// Tap along with the music: the bpm is the average gap between your last taps.
-tap_tempo :: proc() {
-	now := glfw.GetTime()
-	if len(tap_times) > 0 && now - tap_times[len(tap_times) - 1] > 2 {
-		clear(&tap_times)
-	}
-	append(&tap_times, now)
-	if len(tap_times) > 8 {
-		ordered_remove(&tap_times, 0)
-	}
-	if len(tap_times) < 2 {
-		set_status("tap tempo: keep tapping")
-		return
-	}
-	bpm := 60 * f64(len(tap_times) - 1) / (tap_times[len(tap_times) - 1] - tap_times[0])
-	s := &project.settings
-	s.bpm = f32(clamp(bpm, 40, 260))
-	s.grid_type, s.grid_on = .Beats, true
-	set_status("tap tempo: %.1f bpm (%d taps)", s.bpm, len(tap_times))
-}
-
-// Cut on the grid inside the selected segment, or the whole project.
-beat_split :: proc() {
-	s := project.settings
-	step, _ := grid_step(s)
-	from, to := 0.0, project_length(project)
-	if t0, t1, ok := program_range(); ok {
-		from, to = t0, t1
-	}
-	program_split_grid(&project, from, to, step * f64(max(s.cut_every, 1)), grid_origin(s))
-	clear_cut_sel()
-}
-
-// Show the n-th (0-based) video layer. While playing: from the playhead on (a cut
-// is made there, snapped to the grid). Otherwise: on the selected segment, or the
-// one under the playhead.
-show_layer :: proc(n: int) {
-	layers := video_layers(project)
-	if n >= len(layers) {
-		set_status("there is no video layer %d", n + 1)
-		return
-	}
-	if !playing && sel_cut >= 0 { // the whole selected range
-		for k in sel_cut ..= min(sel_cut2, len(project.program) - 1) {
-			project.program[k].layer, project.program[k].fixed = layers[n], true
-		}
-		return
-	}
-	i: int
-	if playing {
-		i = cut_insert(&project, snap(playhead))
-	} else {
-		i = segment_at(project, playhead)
-		if i < 0 {
-			i = cut_insert(&project, snap(playhead))
-		}
-	}
-	project.program[i].layer, project.program[i].fixed = layers[n], true // a layer picked by hand is kept by Randomize
-	select_cuts(i, i)
-}
-
-any_selected :: proc() -> bool {
-	for c in project.clips {
-		if c.selected {return true}
-	}
-	return false
-}
 
 main :: proc() {
 	assert(bool(glfw.Init()))
@@ -487,7 +298,7 @@ main :: proc() {
 	glfw.SetDropCallback(window, on_drop)
 	gl.load_up_to(3, 2, proc(p: rawptr, name: cstring) {
 		(cast(^rawptr)p)^ = glfw.GetProcAddress(name)
-	})
+		})
 
 	im.CHECKVERSION()
 	im.CreateContext()

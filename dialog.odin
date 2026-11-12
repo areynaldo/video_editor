@@ -1,5 +1,6 @@
 package main
 
+import "core:path/filepath"
 import "core:strings"
 import win "core:sys/windows"
 
@@ -60,4 +61,13 @@ file_dialog :: proc(save: bool, title, filter: string, default_name := "", multi
 		append(&paths, strings.concatenate({parts[0], "\\", name}, context.temp_allocator))
 	}
 	return paths[:]
+}
+
+// One file: the chosen path, or ok = false when cancelled. xt (with the dot) is added to a name that has none.
+pick_file :: proc(save: bool, title, filter: string, name := "", ext := "") -> (path: string, ok: bool) {
+	paths := file_dialog(save, title, filter, name)
+	if len(paths) == 0 {return}
+	path = paths[0]
+	if ext != "" && filepath.ext(path) == "" {path = strings.concatenate({path, ext}, context.temp_allocator)}
+	return path, true
 }

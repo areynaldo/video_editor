@@ -27,14 +27,19 @@ Action :: enum {
 	Remove_Audio_Layers,
 	Remove_Video_Layers,
 	Select_All,
+	Background_Color, // the picture's background color (also: double-click the Program picture, or the Inspector with nothing selected)
 	Link,
 	Unlink,
+	Lock, // lock / unlock the selected clips (else the selected layers): a locked clip can't change, Randomize keeps locked slices
 	// timeline
 	Split,
 	Add_Layer,
 	Remove_Layer,
 	Play, // press twice quickly to stop and return to the checkpoint
 	Toggle_Grid,
+	Slowmo_Enhance, // slow-mo and enhance in one pass (denoise, interpolate, upscale)
+	Enhance_Clips, // prerender the selected video clips upscaled 2x and cleaned (Real-ESRGAN, else ffmpeg)
+	Smooth_Slowmo, // prerender the selected slowed-down video clips with in-between frames (RIFE, else ffmpeg)
 	// tempo + slicing
 	Detect_Bpm, // tempo + first beat from the selected audio clip (else the first one); sets the beat grid
 	Tap_Tempo,
@@ -51,6 +56,15 @@ Action :: enum {
 	Clear_Cuts,
 	Randomize, // with the options of the Randomize window
 	Randomize_Options,
+	// lyrics
+	Lyrics_Panel, // the Lyrics window: the text, one line each, with times
+	Lyric_Add, // a lyric line at the playhead
+	Lyric_Tap, // time the next lyric line at the playhead (press at the start of each line while playing)
+	Lyrics_Open, // import SRT, LRC or TXT
+	Lyrics_Export, // SRT, LRC, ASS or TXT
+	Lyrics_Transcribe, // write the lyrics from what whisper hears (replaces them); fix the words after, the times stay
+	Lyrics_Align, // time the lines from the song (whisper.cpp); with no lyrics it writes them
+
 	// not in the menus or the palette: keys only
 	To_Checkpoint, // stop and return to the checkpoint (last click on the ruler / empty timeline)
 	Go_Start,
@@ -100,14 +114,19 @@ ACTION_INFO := [Action]Action_Info {
 	.Remove_Video        = {"Remove video", "edit", "Edit", false, false},
 	.Remove_Audio_Layers = {"Remove audio layers", "edit", "Edit", false, false},
 	.Remove_Video_Layers = {"Remove video layers", "edit", "Edit", false, false},
+	.Background_Color    = {"Background color...", "edit", "Edit", true, false},
 	.Select_All          = {"Select all", "edit", "Edit", true, false},
 	.Link                = {"Link", "edit", "Edit", false, false},
 	.Unlink              = {"Unlink", "edit", "Edit", false, false},
+	.Lock                = {"Lock / unlock", "edit", "Edit", false, false},
 	.Split               = {"Split at playhead", "timeline", "Timeline", false, false},
 	.Add_Layer           = {"Add layer", "timeline", "Timeline", true, false},
 	.Remove_Layer        = {"Remove layers", "timeline", "Timeline", false, false},
 	.Play                = {"Play / pause", "timeline", "Timeline", true, false},
 	.Toggle_Grid         = {"Snap to grid", "timeline", "Timeline", false, false},
+	.Slowmo_Enhance       = {"Slow-mo + enhance (render)", "timeline", "Timeline", false, false},
+	.Enhance_Clips       = {"Enhance + upscale (render)", "timeline", "Timeline", false, false},
+	.Smooth_Slowmo       = {"Smooth slow-mo (render)", "timeline", "Timeline", false, false},
 	.Detect_Bpm          = {"Detect bpm", "program", "Tempo", false, false},
 	.Tap_Tempo           = {"Tap tempo", "program", "Tempo", false, false},
 	.Grid_Here           = {"Beat at playhead", "program", "Tempo", false, false},
@@ -123,6 +142,13 @@ ACTION_INFO := [Action]Action_Info {
 	.Clear_Cuts          = {"Clear cuts", "program", "Slice", false, false},
 	.Randomize           = {"Randomize", "program", "Slice", true, false},
 	.Randomize_Options   = {"Randomize options...", "program", "Slice", false, false},
+	.Lyrics_Panel        = {"Lyrics...", "lyrics", "Lyrics", false, false},
+	.Lyric_Add           = {"Add lyric line", "lyrics", "Lyrics", false, false},
+	.Lyric_Tap           = {"Tap lyric line", "lyrics", "Lyrics", false, false},
+	.Lyrics_Open         = {"Open lyrics...", "lyrics", "Lyrics", true, false},
+	.Lyrics_Export       = {"Export lyrics...", "lyrics", "Lyrics", false, false},
+	.Lyrics_Transcribe   = {"Transcribe lyrics (whisper only)", "lyrics", "Lyrics", true, false},
+	.Lyrics_Align        = {"Auto-align lyrics", "lyrics", "Lyrics", true, false},
 	.To_Checkpoint       = {"Back to checkpoint", "timeline", "", false, true},
 	.Go_Start            = {"Go to start", "timeline", "", false, true},
 	.Go_End              = {"Go to end", "timeline", "", false, true},
@@ -147,4 +173,4 @@ ACTION_INFO := [Action]Action_Info {
 	.Reload_Keys         = {"Reload keys", "app", "Help", false, false},
 }
 
-MENU_GROUPS :: [?]string{"File", "Edit", "Timeline", "Tempo", "Slice", "Help"}
+MENU_GROUPS :: [?]string{"File", "Edit", "Timeline", "Tempo", "Slice", "Lyrics", "Help"}

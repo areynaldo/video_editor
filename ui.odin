@@ -2,7 +2,6 @@ package main
 
 import "core:fmt"
 import "core:math"
-import "core:slice"
 import "core:strings"
 
 import im "deps/odin-imgui"
@@ -23,7 +22,7 @@ cstr :: proc(s: string) -> cstring {
 
 frame :: proc() {
 	for a in Action {
-		if pressed(a) {
+		if !job.active && !slow_dialog.open && pressed(a) { // nothing happens by key while a job runs
 			do_action(a)
 		}
 	}
@@ -67,7 +66,11 @@ frame :: proc() {
 	if show_timeline {panel_timeline()}
 	panel_randomize()
 	panel_patterns()
+	panel_lyrics()
 	panel_palette()
+	slowmo_dialog_ui()
+	job_ui()
+	report_ui()
 
 	history_commit(drag != .None || im.IsAnyItemActive())
 }
@@ -115,8 +118,14 @@ panel_preview :: proc() {
 	a := im.Vec2{cur.x + (avail.x - cw) / 2, cur.y + (avail.y - ch) / 2}
 	b := im.Vec2{a.x + cw, a.y + ch}
 	im.Dummy(avail)
+	if (im.IsItemHovered() && im.IsMouseDoubleClicked(.Left)) || bg_popup_open { // double-click the picture, or the command
+		im.OpenPopup("##bgcolor")
+		bg_popup_open = false
+	}
+	background_popup()
 
 	dl := im.GetWindowDrawList()
+	defer draw_lyric_preview(dl, a, b) // over the picture, also when there is none
 	im.DrawList_AddRectFilled(dl, a, b, im.ColorConvertFloat4ToU32({s.bg.r, s.bg.g, s.bg.b, 1})) // the background colour
 	ci := video_clip_at(project, playhead)
 	if ci < 0 {
@@ -128,8 +137,13 @@ panel_preview :: proc() {
 		return
 	}
 	// fit the frame into the canvas, then apply the clip transform (same math as export)
-	k := min(cw / f32(pv_w), ch / f32(pv_h)) * c.scale
-	hw, hh := f32(pv_w) * k / 2, f32(pv_h) * k / 2
+	kx := min(cw / f32(pv_w), ch / f32(pv_h))
+	ky := kx
+	#partial switch c.fit {
+	case .Fill:    kx = max(cw / f32(pv_w), ch / f32(pv_h)); ky = kx
+	case .Stretch: kx, ky = cw / f32(pv_w), ch / f32(pv_h)
+	}
+	hw, hh := f32(pv_w) * kx * c.scale / 2, f32(pv_h) * ky * c.scale / 2
 	px := cw / f32(s.width) // canvas pixels -> screen pixels
 	center := im.Vec2{a.x + cw / 2 + c.pos.x * px, a.y + ch / 2 + c.pos.y * px}
 	sin_r, cos_r := math.sincos(c.rotation * math.PI / 180)
@@ -144,7 +158,7 @@ panel_preview :: proc() {
 		corner(center, hw, -hh, sin_r, cos_r),
 		corner(center, hw, hh, sin_r, cos_r),
 		corner(center, -hw, hh, sin_r, cos_r),
-	)
+		)
 	im.DrawList_PopClipRect(dl)
 }
 
@@ -175,10 +189,127 @@ inspector_hits :: proc(k: Clip, kind: Clip_Kind) -> bool {
 	return false
 }
 
+// Typical output sizes. Pick one, or type width and height.
+Size_Preset :: struct {
+	name:  cstring,
+	w, h:  i32,
+}
+
+SIZE_PRESETS := [?]Size_Preset {
+	{"1080p  1920x1080 (16:9)", 1920, 1080},
+	{"4K  3840x2160 (16:9)", 3840, 2160},
+	{"1440p  2560x1440 (16:9)", 2560, 1440},
+	{"720p  1280x720 (16:9)", 1280, 720},
+	{"Vertical  1080x1920 (9:16)", 1080, 1920},
+	{"Vertical 4K  2160x3840 (9:16)", 2160, 3840},
+	{"Vertical 720p  720x1280 (9:16)", 720, 1280},
+	{"Portrait  1080x1350 (4:5)", 1080, 1350},
+	{"Square  1080x1080 (1:1)", 1080, 1080},
+	{"Cinema  1920x804 (2.39:1)", 1920, 804},
+}
+
+// The output size: a preset list and a button to turn it 90 degrees.
+size_presets :: proc(s: ^Settings) {
+	current: cstring = "custom size"
+	for p in SIZE_PRESETS {
+		if p.w == s.width && p.h == s.height {current = p.name}
+	}
+	im.SetNextItemWidth(-90)
+	if im.BeginCombo("size", current) {
+		for p in SIZE_PRESETS {
+			if im.Selectable(p.name, p.w == s.width && p.h == s.height) {s.width, s.height = p.w, p.h}
+		}
+		im.EndCombo()
+	}
+	im.Text("%d x %d", s.width, s.height)
+	im.SameLine()
+	if im.Button("turn") {s.width, s.height = s.height, s.width}
+	tip("Swap width and height (horizontal <-> vertical)")
+}
+
+bg_popup_open: bool // set by the Background color command: the Program panel opens the picker
+
+// The color picker over the Program picture.
+background_popup :: proc() {
+	if !im.BeginPopup("##bgcolor") {return}
+	defer im.EndPopup()
+	im.TextDisabled("Background color")
+	im.ColorPicker3("##bg", &project.settings.bg, {.NoSidePreview})
+	if im.Button("Black") {project.settings.bg = {0, 0, 0}}
+	im.SameLine()
+	if im.Button("White") {project.settings.bg = {1, 1, 1}}
+	im.SameLine()
+	if im.Button("Grey") {project.settings.bg = {0.18, 0.18, 0.18}}
+}
+
+// Moves every selected slice to other footage (dir +1 next, -1 previous, 0 reroll). Returns how many changed.
+nudge_selected_slices :: proc(dir: int) -> (n: int) {
+	for i in 0 ..< len(project.clips) {
+		if project.clips[i].selected && slice_nudge(&project, i, dir, project.settings.rand.footage) {n += 1}
+	}
+	return
+}
+
+// Randomize settings and the selected slices, in the Inspector: how the footage is chosen, lock, reroll.
+inspector_slices :: proc() {
+	o := &project.settings.rand
+	slices, locked, sel, sel_locked := 0, 0, 0, 0
+	for c in project.clips {
+		if !c.slice {continue}
+		slices += 1
+		locked += c.locked ? 1 : 0
+		if c.selected {
+			sel += 1
+			sel_locked += c.locked ? 1 : 0
+		}
+	}
+
+	im.SeparatorText("Randomize")
+	slice_i := i32(o.slice)
+	im.SetNextItemWidth(-90)
+	if im.Combo("slice at", &slice_i, "the program's cuts\x00the pattern\x00the beat grid\x00\x00") {o.slice = Rand_Slice(slice_i)}
+	footage := i32(o.footage)
+	im.SetNextItemWidth(-90)
+	if im.Combo("footage", &footage, "same time\x00in order\x00any piece\x00\x00") {o.footage = Rand_Footage(footage)}
+	if im.IsItemHovered() {
+		im.SetTooltip("same time: what plays at that time (cuts between clips)\nin order: each clip plays forward, a piece at a time\nany piece: a random piece\n\nThis also decides what the wheel and Reroll give a slice.")
+	}
+	if o.footage != .Same_Time {im.Checkbox("use all clips", &o.use_all)}
+	im.SetNextItemWidth(-90)
+	im.InputInt("max in a row", &o.max_run)
+	o.max_run = max(o.max_run, 0)
+	if im.Button("Randomize") {do_action(.Randomize)}
+	tip("Make new slices. Locked slices stay, the others change.")
+	im.SameLine()
+	if im.Button("Options...") {show_randomize = true}
+	if slices > 0 {dim_f("%d slices, %d locked", slices, locked)}
+
+	if sel > 0 {
+		im.SeparatorText("Selected slices")
+		text_f("%d selected, %d locked", sel, sel_locked)
+		if im.Button(sel_locked == sel ? "Unlock" : "Lock") {do_action(.Lock)}
+		tip(fmt.tprintf("A locked slice stays when you Randomize again (%s)", bindings[.Lock][0].text))
+		im.SameLine()
+		if im.Button("<") {set_status("%d slice(s): previous footage", nudge_selected_slices(-1))}
+		im.SameLine()
+		if im.Button(">") {set_status("%d slice(s): next footage", nudge_selected_slices(1))}
+		im.SameLine()
+		if im.Button("Reroll") {set_status("%d slice(s) rerolled", nudge_selected_slices(0))}
+		tip("New random footage for the selected slices (they get locked)")
+		im.TextDisabled("Mouse wheel over a slice: next / previous footage")
+	}
+}
 panel_inspector :: proc() {
 	defer im.End()
 	if !im.Begin("Inspector", &show_inspector) {
 		return
+	}
+	defer { // always here, also with nothing selected: the randomize settings and the picture
+		inspector_slices()
+		im.SeparatorText("Picture")
+		size_presets(&project.settings)
+		im.ColorEdit3("background", &project.settings.bg)
+		im.TextDisabled("or double-click the picture")
 	}
 	vi, ai := -1, -1
 	for c, i in project.clips {
@@ -202,24 +333,33 @@ panel_inspector :: proc() {
 	// edits apply to every selected clip of that kind
 	if vi >= 0 {
 		im.Separator()
+		// only what you change goes to the other clips (their other values stay)
 		c := project.clips[vi]
-		changed := false
-		changed |= im.DragFloat2("position", &c.pos, 1, 0, 0, "%.0f px")
-		changed |= im.DragFloat("scale", &c.scale, 0.01, 0.01, 10, "%.2f")
-		changed |= im.DragFloat("rotation", &c.rotation, 0.5, -360, 360, "%.1f deg")
-		if im.Button("Reset transform") {
-			c.pos, c.scale, c.rotation = {}, 1, 0
-			changed = true
+		ch_pos := im.DragFloat2("position", &c.pos, 1, 0, 0, "%.0f px")
+		ch_scale := im.DragFloat("scale", &c.scale, 0.01, 0.01, 10, "%.2f")
+		ch_rot := im.DragFloat("rotation", &c.rotation, 0.5, -360, 360, "%.1f deg")
+		ch_fit := false
+		im.SetNextItemWidth(-90)
+		if im.BeginCombo("fit", FIT_NAMES[c.fit]) {
+			for m in Fit_Mode {
+				if im.Selectable(FIT_NAMES[m], m == c.fit) {c.fit = m; ch_fit = true}
+			}
+			im.EndCombo()
 		}
-		if changed {
+		if im.Button("Reset transform") {
+			c.pos, c.scale, c.rotation, c.fit = {}, 1, 0, .Fit
+			ch_pos, ch_scale, ch_rot, ch_fit = true, true, true, true
+		}
+		if ch_pos || ch_scale || ch_rot || ch_fit {
 			for &k in project.clips {
-				if inspector_hits(k, .Video) {
-					k.pos, k.scale, k.rotation = c.pos, c.scale, c.rotation
-				}
+				if !inspector_hits(k, .Video) {continue}
+				if ch_pos {k.pos = c.pos}
+				if ch_scale {k.scale = c.scale}
+				if ch_rot {k.rotation = c.rotation}
+				if ch_fit {k.fit = c.fit}
 			}
 		}
-	}
-	if ai >= 0 {
+	}	if ai >= 0 {
 		im.Separator()
 		g := project.clips[ai].gain_db
 		changed := im.DragFloat("volume", &g, 0.1, -60, 12, g <= -60 ? "muted" : "%.1f dB")
@@ -337,6 +477,7 @@ panel_project :: proc() {
 		im.InputText("name", cstring(&s.name[0]), len(s.name))
 		im.ColorEdit3("background", &s.bg, {.NoInputs})
 		im.DragInt("frame rate", &s.fps, 0.2, 1, 120)
+		size_presets(s)
 		im.InputInt("width", &s.width, 2, 100)
 		im.InputInt("height", &s.height, 2, 100)
 		s.fps = clamp(s.fps, 1, 120)

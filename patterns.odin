@@ -221,13 +221,6 @@ apply_pattern :: proc(idx := -1) {
 	set_status("applied pattern %s", get_fixed(pat.name[:]))
 }
 
-step_pattern_sel :: proc(delta: int) {
-	if n := len(project.patterns); n > 0 {
-		project.settings.pattern_sel = i32((int(project.settings.pattern_sel) + delta + n) % n)
-		set_status("pattern: %s", get_fixed(cur_pattern().name[:]))
-	}
-}
-
 // ---------------------------------------------------------------- panel (composing)
 
 show_patterns: bool
@@ -384,7 +377,7 @@ panel_patterns :: proc() {
 	}
 	im.SameLine()
 	im.TextDisabled(cstr(sel_cut >= 0 ? "to the selected range" : "to everything"))
-	im.TextDisabled(cstr(fmt.tprintf("%.1f bpm.  mark = slice only, V1.. = also show that layer", project.settings.bpm)))
+	dim_f("%.1f bpm.  mark = slice only, V1.. = also show that layer", project.settings.bpm)
 }
 
 strings_cat :: proc(a, b: string) -> string {

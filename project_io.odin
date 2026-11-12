@@ -30,6 +30,11 @@ save_project :: proc(p: Project, path: string) -> bool {
 			strings.write_string(&b, "\n")
 		}
 	}
+	fmt.sbprintf(&b, "\n[lyrics]\nsize = %.2f\nburn = %d\nmode = %d\ncolor = %06x\nborder = %06x\nborder_w = %.1f\nfont = %s\n", s.lyric_size, s.lyric_burn ? 1 : 0, int(s.lyric_mode), rgb_hex(s.lyric_color), rgb_hex(s.lyric_border), s.lyric_border_w, get_fixed(s.lyric_font[:]))
+	for l in p.lyrics {
+		text, _ := strings.replace_all(text_of(l), "\n", "\\n", context.temp_allocator)
+		fmt.sbprintf(&b, "\n[lyric]\nt0 = %.4f\nt1 = %.4f\ntext = %s\n", l.t0, l.t1, text)
+	}
 	for part in p.parts {
 		fmt.sbprintf(&b, "\n[part]\nt0 = %.6f\nt1 = %.6f\npattern = %d\n", part.t0, part.t1, part.pattern)
 	}
@@ -50,7 +55,9 @@ save_project :: proc(p: Project, path: string) -> bool {
 			&b,
 			"\n[clip]\nsource = %d\nkind = %s\ntrack = %d\nstart = %.6f\nin = %.6f\nduration = %.6f\nspeed = %.6f\ngroup = %d\nx = %.3f\ny = %.3f\nscale = %.4f\nrotation = %.3f\ngain = %.2f\n",
 			c.source, c.kind == .Video ? "video" : "audio", c.track, c.start, c.in_point, c.duration, c.speed, c.group, c.pos.x, c.pos.y, c.scale, c.rotation, c.gain_db,
-		)
+			)
+		if c.fit != .Fit {fmt.sbprintf(&b, "fit = %d\n", int(c.fit))}
+		if c.slice {fmt.sbprintf(&b, "slice = 1\nlocked = %d\n", c.locked ? 1 : 0)}
 	}
 	return os.write_entire_file(path, transmute([]byte)strings.to_string(b)) == nil
 }
@@ -79,6 +86,7 @@ load_project :: proc(p: ^Project, path: string) -> (err: string) {
 			case "cut":    append(&p.program, Cut{layer = -1})
 			case "pattern": append(&p.patterns, Pattern{length = 16, div = 4})
 			case "part":    append(&p.parts, Part{pattern = -1})
+			case "lyric":   append(&p.lyrics, Lyric{})
 			}
 			continue
 		}
@@ -119,6 +127,25 @@ load_project :: proc(p: ^Project, path: string) -> (err: string) {
 				for ext, fmt_ in FORMAT_EXT {
 					if ext == val {p.settings.format = fmt_}
 				}
+			}
+		case "lyrics":
+			switch key {
+			case "size": p.settings.lyric_size = f32(clamp(f, 1, 30))
+			case "burn": p.settings.lyric_burn = n != 0
+			case "mode": p.settings.lyric_mode = Lyric_Mode(clamp(n, 0, 2))
+			case "color": if v, ok := strconv.parse_int(val, 16); ok {p.settings.lyric_color = hex_rgb(v)}
+			case "border": if v, ok := strconv.parse_int(val, 16); ok {p.settings.lyric_border = hex_rgb(v)}
+			case "border_w": p.settings.lyric_border_w = f32(clamp(f, 0, 30))
+			case "font": set_fixed(p.settings.lyric_font[:], val)
+			}
+		case "lyric":
+			l := &p.lyrics[len(p.lyrics) - 1]
+			switch key {
+			case "t0":   l.t0 = f
+			case "t1":   l.t1 = f
+			case "text":
+				text, _ := strings.replace_all(val, "\\n", "\n", context.temp_allocator)
+				set_fixed(l.text[:], text)
 			}
 		case "track":
 			switch key {
@@ -191,6 +218,9 @@ load_project :: proc(p: ^Project, path: string) -> (err: string) {
 			case "duration": c.duration = f
 			case "speed":    c.speed = f
 			case "group":    c.group = n
+			case "slice":    c.slice = n != 0
+			case "fit":      c.fit = Fit_Mode(clamp(n, 0, 2))
+			case "locked":   c.locked = n != 0
 			case "x":        c.pos.x = f32(f)
 			case "y":        c.pos.y = f32(f)
 			case "scale":    c.scale = f32(f)
@@ -204,6 +234,7 @@ load_project :: proc(p: ^Project, path: string) -> (err: string) {
 	for &s in p.sources {
 		if probed, ok := probe(s.path); ok {
 			s.duration, s.has_video, s.has_audio = probed.duration, probed.has_video, probed.has_audio
+			s.width, s.height = probed.width, probed.height
 		}
 		media_start(s, int(clamp(p.settings.fps, 1, 30)))
 	}
