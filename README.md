@@ -1,52 +1,56 @@
 # Video Editor
 
-A small video editor for personal music videos. It cuts video clips to the beat of a song.
+A small video editor for music videos. It cuts clips to the beat of a song.
 
 ![Video Editor](docs/screenshot.png)
 
-## Main features
+## Features
 
-- Import video and audio files. Use **Import** or drop files on the window.
-- Remove the sound of video files. The song stays.
-- Detect the bpm of a song. If the result is wrong, pick another candidate or tap the tempo.
-- Show a beat grid. Cuts and clips snap to the grid.
-- Make patterns. A pattern is a loop of hits on the beat grid, like a drum machine. Each hit makes a cut.
-- Make parts. A part is a time range with its own pattern.
+- Import video and audio. Use **Import** (`ctrl+i`) or drop files on the window.
+- Detect the bpm. Pick another candidate or tap the tempo if the result is wrong.
+- Show a beat grid. Cuts and clips snap to it. Hold `alt` to turn snapping off.
+- Make patterns. A pattern is a loop of hits on the grid, like a drum machine. Each hit makes a cut.
+- Paint parts. A part is a time range with a pattern. Cuts update when you paint, move, resize, duplicate, or split a part.
 - Show one video layer at a time. The program row shows which layer is visible.
-- Select a range in the program row. Copy it, paste it, repeat it, or loop it.
-- Randomize. It fills each slice of the rhythm with footage from your clips, on a new layer. The footage is the same time, in order, or any piece.
-- Lock clips and slices (`k`). A locked clip does not change. Randomize again: locked slices stay, the other slices change. Roll the mouse wheel on a slice to reroll its footage (all selected slices if the pointer is over a selected one). The wheel does not lock.
-- Add lyrics. Type the text, one line each, with times. Edit the lines in the Lyrics row of the timeline. Press **Auto-align** to time the lines from the song (needs whisper.cpp), or tap the start of each line while the song plays. The lines show in the preview and in the export. Pick what is shown (one word, a sentence, or a verse that builds up), the font, the text color, and the border color. Open and save SRT, LRC, ASS, and TXT.
-- Make smooth slow motion. Select clips. Press **Smooth slow-mo**. A window sets the speed in percent or the new length (the two follow each other), then renders. You can also slow a clip by hand (`shift` + drag its edge). Commands act on all selected clips. It renders the new frames one time and keeps the file in the `cache` folder.
-- Enhance clips. **Enhance + upscale** renders a clip at twice the size, cleaner, sharper, with fixed levels.
-- Long jobs (auto-align, slow-mo, enhance) run in the background. A loading window shows the progress in percent, and the editor does not freeze. **Cancel** stops the job.
-- Set the output size from a list (1080p, 4K, vertical 9:16, square, 4:5, ...) in the Inspector or the Sequence panel. Turn it with one button. Pick how a clip fills the picture: **fit** (background around), **fill** (crop the edges), or **stretch**.
-- Set the background color: double-click the Program picture, use **Edit > Background color...** (or `F1`), or use the Inspector. Set the transform of one slice or of all slices of a clip.
-- Edit on many layers. Lock, hide, mute, or solo a layer.
-- Play with sound. See the waveform and the level meters.
-- Export with ffmpeg to mp4, mkv, webm, or mov. **Quality** (Project settings): typical (x264 crf 19), high (crf 16, slow preset, the default), max (crf 12, near lossless, big files). Audio is aac 192k to 320k (webm: VP9 and Opus). The export reads the original files at full size. Only the preview works from small frames (960x540).
+- Randomize. It fills each slice of the rhythm with your footage on a new layer.
+- Lock clips and slices (`k`). Locked slices stay when you randomize again.
+- Roll the mouse wheel on a slice to reroll it. The wheel does not lock.
+- Add lyrics. Edit text and times. Align them from the song. Burn them into the export. Import and export SRT, LRC, ASS, and TXT.
+- Make smooth slow motion with RIFE. Enhance and upscale with Real-ESRGAN.
+- Set the output size, a mask (fake borders, for example 9:16 in a 16:9 project), and the background color.
+- Run long jobs in the background. A window shows the progress. **Cancel** stops the job.
+- Export to mp4, mkv, webm, or mov. Choose the quality: typical, high (default), or max.
 - Use undo and redo. Press **F1** to search all commands.
 
-## Ideal workflow
+## Workflow
 
-1. Import your video files and your song (`ctrl+i`).
-2. Press **Remove audio** (`shift+delete`). This removes the sound of the video files.
-3. Select the song. Press **Detect bpm** (`t`).
-4. If the bpm is wrong, click another candidate in the **Sequence** panel. Or press **Tap** (`shift+t`) with the music.
-5. If the grid is not on the beat, move the playhead to a beat. Press **Beat at playhead** (`shift+h`).
-6. Open **Patterns** (`shift+p`). Press **New**. Click the steps to make hits.
-7. Set each lane to a layer (V1, V2, ...) or to `mark`. A `mark` only makes a cut.
-8. Parts apply their pattern by themselves: the cuts appear while you paint, move, resize, duplicate (`ctrl`+`d`) or split (`s`) a part, or edit the pattern (no apply step; cuts inside a changed part belong to its pattern, and its hits are drawn in the part). **Apply pattern** (`p`) is for the whole project or a selected range without parts. To use other patterns in other places, pick a pattern in the **brush** strip of the Timeline. Parts work like clips in the **Parts** row: drag on empty space to paint one (`shift`+drag paints over other parts and cuts them back), drag a part to move it, drag its edges to resize it (it stops at its neighbours). **Double-click** a part to edit its pattern, start, end and length in numbers. **Double-click** free space to fill the gap with the brush. Clicking a brush chip while a part is selected repaints that part; `ctrl`+click also repaints. Right-click a part for more.
-9. Select a range in the program row. Press `ctrl+c` to copy, `ctrl+v` to paste, or `ctrl+r` to repeat it. Press `ctrl+l` to loop the playback.
-10. Open **Randomize options** (`shift+r`). Set the options. Press **Randomize** (`r`).
-    - It slices at the cuts, the pattern, or the grid. It fills each slice with footage on a new layer.
-    - A lane with a layer keeps its layer.
-    - The **Randomize** section of the Inspector shows and sets how the footage is chosen (slice at, footage, use all clips, **spread clips evenly**, max in a row). Spread (on by default) picks clips by how much footage they have left, so every clip shows up at the same rate over the whole video. Without it clips take equal turns and the short ones are used up at the start.
-    - Select slices you like. Press **Lock** (`k`) or the Inspector button. **Reroll** gives selected slices new random footage. Press `r` again: locked slices stay, the others change.
-    - Roll the mouse wheel on a slice to reroll it. The footage mode decides where the new footage comes from. The slice is not locked: press `k` to keep it.
-11. For lyrics, press **Lyrics** (`shift+y`). Paste the text. Press `space` to play the song. Or press **Auto-align**. Or press **Tap** (`y`) at the start of each line. Drag lines in the Lyrics row to correct them: click or ctrl+click to select, drag a box to select many, drag one to move them all. The **move** buttons in the Lyrics window shift all lines or the selected ones. Use **Lyrics > Export lyrics** to save a subtitle file.
-12. Press `space` to play. Press `ctrl+z` to undo a change.
-13. Press **Export** (`ctrl+e`).
+1. Import your clips and your song.
+2. Press **Remove audio** (`shift+delete`) to remove the sound of the clips.
+3. Select the song. Press **Detect bpm** (`t`). Press **Beat at playhead** (`shift+h`) if the grid is off the beat.
+4. Open **Patterns** (`shift+p`). Press **New**. Click steps to make hits.
+5. Set each lane to a layer (V1, V2, ...) or to `mark`. A `mark` only makes a cut.
+6. Pick a pattern in the **brush** strip. Paint parts in the **Parts** row:
+   - Drag on empty space to paint a part. Painting over a part cuts it. The rest stays.
+   - Drag the top strip of a part to move it. Drag an edge to cut or extend it. The pattern stays in place.
+   - Double-click a part to type its start, end, and length. Double-click free space to fill the gap.
+   - Press `ctrl+d` to duplicate a part. Press `s` to split it at the playhead.
+   - Right-click a part to change its pattern.
+   - Press **Apply pattern** (`p`) only when you use no parts.
+7. Select a range in the program row. Press `ctrl+c`, `ctrl+v`, or `ctrl+r` to copy, paste, or repeat it. Press `ctrl+l` to loop it.
+8. Open **Randomize options** (`shift+r`). Press **Randomize** (`r`).
+   - **slice at** sets the slices: cuts, pattern, or grid.
+   - **footage** sets the source: same time, in order, or any piece.
+   - **spread clips evenly** (default) shows every clip at the same rate over the whole video.
+   - **max in a row** limits repeats of one clip.
+9. Lock the slices you like (`k`). Randomize again. Only the other slices change.
+10. For lyrics, press **Lyrics** (`shift+y`). Paste the text. Press **Auto-align** or **Tap** (`y`).
+11. Press **Export** (`ctrl+e`).
+
+## Timeline
+
+- `ctrl+wheel` zooms in time. `alt+wheel` changes the height of the lanes.
+- The ruler stays at the top when you scroll.
+- Middle mouse button pans.
 
 ## Build
 
@@ -56,94 +60,78 @@ You need:
 - The [Odin compiler](https://odin-lang.org)
 - `ffmpeg` and `ffprobe` in your `PATH`
 
-Get the source and the submodule, then build:
-
 ```
 git clone --recurse-submodules https://github.com/areynaldo/video_editor.git
 cd video_editor
 .\setup.ps1
 odin build . -out:editor.exe
-```
-
-Run:
-
-```
 editor.exe
-editor.exe project.vproj
 ```
 
-`setup.ps1` runs one time. It applies a small fix to the Dear ImGui bindings (see **Notes**).
+`setup.ps1` runs one time. It fixes the Dear ImGui bindings (see **Notes**).
 
-## Auto-align lyrics (optional)
+## Export
 
-Auto-align uses [whisper.cpp](https://github.com/ggml-org/whisper.cpp). It does not need Python.
+Choose the **quality** in Project settings:
 
-1. Get `whisper-cli.exe` (with its DLL files) from the whisper.cpp releases. Put it in the `tools` folder or in your `PATH`.
-2. Get a ggml model, for example `ggml-base.bin`. For a language other than English, use a model without `.en`.
-3. Open **Lyrics > Lyrics...**. Open **auto-align setup**. Pick the model file and set the language (`auto` or `en`, `es`, ...).
-4. Select the song. Press **Auto-align**. A loading window shows while it listens. By default it listens to the voice range only (a simple filter). For better results, set a vocal separator command (**separator** field): any tool that writes the vocals as a wav file. Use `{in}` for the song, and `{out}` or `{dir}` for the result.
+| Quality | Video | Audio |
+|---|---|---|
+| typical | x264 crf 19 | aac 192k |
+| high (default) | x264 crf 16, slow | aac 256k |
+| max | x264 crf 12, slow (big files) | aac 320k |
 
-It places the lines on a clock that counts only the seconds when the voice is on, so the gaps between phrases stay empty. The words that it heard right are anchors; between them the lines are spread by length. After each run it writes `lyrics_align_debug.txt` (the voiced parts, the heard words and the line times) for checking.
+WebM uses VP9 and Opus. The export reads the original files at full size. The preview uses small frames (960x540).
 
-The lines also follow the silences of the audio: a line that starts or stops inside a quiet part is moved to where the voice really starts or stops. This works best on separated vocals. Example separator command with [uv](https://docs.astral.sh/uv/): `uv tool run --python 3.12 --from "audio-separator[cpu]" --with audioread audio-separator {in} --output_dir {dir} --single_stem Vocals --model_filename UVR-MDX-NET-Voc_FT.onnx --output_format WAV`. The first run downloads the model. `--with audioread` adds a package that audio-separator 0.48 needs but does not list. Python 3.12 is used (uv fetches it): the newest Python has no ready-made packages for some of the libraries, and building them fails.
+## Slow motion and enhance (optional)
 
-**Whisper align** (the default when you have lyrics in the window) lets whisper itself place your text on the audio, with [stable-ts](https://github.com/jianfch/stable-ts). It is the usual tool for lyrics, and whisper copes with music and fast words better than the small alignment models. It needs [uv](https://docs.astral.sh/uv/): the first run fetches Python, torch, stable-ts, and a whisper model. Set the language (for example `es`) in the auto-align setup; `auto` finds it from the audio. A model name at the end of the command picks the size (small is the default, medium or large-v3 are better and slower). Pick the engine in the setup: **whisper aligns your words** (default), **voice model lines up your words (CTC)**, or **whisper listens** (the old way, and the only one that works without lyrics).
+Put the tools in `tools\` or in your `PATH`:
 
-**Forced alignment with a voice model (CTC)** is the most exact way. It does not recognise what is sung. A voice model (wav2vec2 / MMS, 1100+ languages) says how likely each letter is in every 20 ms of the audio. Then your words are lined up with those frames by the best monotone path, so every word of your text is placed where the voice says it, and silences stay empty. It needs [uv](https://docs.astral.sh/uv/): the first run fetches Python, torch, transformers and the model (about 2 GB, once). The script is `scripts/ctc_emissions.py`. The model `MahmoudAshraf/mms-300m-1130-forced-aligner` has a non-commercial license (CC-BY-NC 4.0). For Spanish (or any language) you can pick a model made for it: add its name at the end of the aligner command, for example `... scripts\ctc_emissions.py {wav} {out} jonatasgrosman/wav2vec2-large-xlsr-53-spanish`. Such a model has its own alphabet (accents, ñ); the editor uses it. Where the voice model hears nothing (a loud beat, a bad vocal track) the words are spread evenly over that audio instead of being squeezed. If lines still get far too little time, a message says so and shows what the model heard for every 10 s. Letters a-z (with accents removed) are aligned; other alphabets are not. It is much better with **vocals only** and a real separator.
+- `rife-ncnn-vulkan.exe` with a model folder such as `rife-v4.6`.
+- `realesrgan-ncnn-vulkan.exe` with its `models` folder.
 
-With lyrics in the window, it matches your words to the words it hears and times each line. With no lyrics, it writes the lines from what it hears. Check the result in the Lyrics row. Singing over loud music gives weaker results than speech. Then use **Tap** or drag lines to correct them.
+Select clips. Press **Smooth slow-mo**. Set the speed in percent or the new length. Press **Apply and render**.
 
-## Smooth slow-mo (optional)
+- RIFE reads the source frames without resampling. This keeps the motion smooth.
+- Frames larger than the project are shrunk before RIFE. Smaller frames stay as they are.
+- Frames are PNG. The result is x264 crf 12. The files are in `cache\`.
+- **Slow-mo + enhance** denoises, interpolates, and upscales. It skips upscaling when the source is as big as the project.
+- Without RIFE, ffmpeg `minterpolate` makes the frames. It is slower and has more errors.
+- Real-ESRGAN uses `realesr-general-x4v3` if present. Otherwise it uses `realesr-animevideov3` (made for anime).
+- Write a GPU number in `tools\gpu.txt` if the wrong GPU is used.
+- If the GPU runs out of memory, the editor tries again with one frame at a time.
 
-A slowed clip repeats frames. **Smooth slow-mo** makes new frames between them.
+## Align lyrics (optional)
 
-- With `rife-ncnn-vulkan.exe` (in `tools\` or in your `PATH`, with a `rife-v4.6` model folder) it uses the RIFE ML model on the GPU. This gives the best result. RIFE gets the source's own frames (not resampled to the project fps), which keeps the motion smooth. The cache file name includes the tools used, so a render made with ffmpeg is never mistaken for a RIFE one. `tools\gpu.txt` with a number picks the GPU.
-- Without it, it uses the ffmpeg `minterpolate` filter. This needs no extra tool, but it is slower and shows more errors on fast motion.
+Open **Lyrics** and **auto-align setup**. Choose an engine:
 
-The sound is not changed. A loading window shows while it renders.
+- **whisper listens** (default). It uses [whisper.cpp](https://github.com/ggml-org/whisper.cpp). Put `whisper-cli.exe` in `tools\`. Set a ggml model and the language.
+- **whisper aligns your words**. It uses [stable-ts](https://github.com/jianfch/stable-ts) through [uv](https://docs.astral.sh/uv/).
+- **voice model (CTC)**. It uses `scripts/ctc_emissions.py` through uv. The first run downloads about 2 GB.
 
-**Slow-mo + enhance** does both in one pass: denoise, then interpolate, then upscale. With RIFE and Real-ESRGAN both in `tools\` it runs on the GPU. Without them it uses ffmpeg on all CPU cores.
+Select the song. Press **Auto-align**. Check the lines in the Lyrics row. Use **Tap** or drag lines to fix them.
 
-Upscaling is skipped when the source is already as big as the project (a 1080p clip in a 1080p project): it would only be shrunk again at export. The status line shows how long each step took (cut, RIFE, Real-ESRGAN, encode), so you can see what is slow.
-
-The ML tools use the Vulkan GPU that they find first. A computer with two GPUs (for example a laptop with an integrated GPU) may need a choice: write the device number (`0`, `1`, ...) in `tools\gpu.txt`.
-
-## Enhance and upscale (optional)
-
-**Enhance + upscale** (Timeline menu) renders the selected video clips at twice the size.
-
-- With `realesrgan-ncnn-vulkan.exe` (in `tools\` or in your `PATH`, with its `models` folder) it uses Real-ESRGAN on the GPU. It uses `realesr-general-x4v3` if you have it, else `realesr-animevideov3` (small and fast, made for anime).
-- Without it, it uses ffmpeg: Lanczos upscale, denoise, sharpen, and automatic levels.
-
-It is not an AI color corrector. The levels fix is a simple filter.
-
-## Only whisper: write the lyrics from the song
-
-Press **Transcribe** in the Lyrics window (or **Lyrics > Transcribe lyrics**). Whisper listens to the song and the lines it hears become the lyrics, with their times. This replaces the lines that are there. Then fix the wrong words in the text box: the times stay. Whisper breaks lines at its commas and at pauses, and sung words that it stretches over a silence are cut back to where the voice returns.
-
-## Test the alignment outside the editor
-
-`scripts\diagnose.py` runs the stages one by one and prints what each finds: how loud the audio is (10 s at a time), the words whisper hears with their times (and how many in each 10 s), and how your lyrics line up with them. Run it on the song and on the separated vocals (`lyrics_align_heard.wav`) to see which one whisper hears:
-
-```n uv run --python 3.12 --no-project --with faster-whisper --with numpy scripts\diagnose.py song.mp3 lyrics.txt --stem lyrics_align_heard.wav --lang es
-```n
-Add `--crisper` to also try [CrisperWhisper](https://github.com/nyrahealth/CrisperWhisper) (needs its transformers fork: add `--with "transformers @ git+https://github.com/nyrahealth/transformers.git@crisper_whisper" --with torch`).
+- **vocals only** with a separator command gives better results. Example with uv:
+  `uv tool run --python 3.12 --from "audio-separator[cpu]" --with audioread audio-separator {in} --output_dir {dir} --single_stem Vocals --model_filename UVR-MDX-NET-Voc_FT.onnx --output_format WAV`
+- **Transcribe** writes the lyrics from what whisper hears. It replaces the existing lines.
+- After a run, `lyrics_align_debug.txt` shows the heard words and the line times.
+- `scripts\diagnose.py` tests each stage outside the editor.
 
 ## When a job fails
 
-Auto-align, slow-mo, and enhance show a **Problem** window with the full text of what the tool said. Use **Copy** to take it. The text is also in `last_job_error.txt`. Auto-align writes `lyrics_align_debug.txt` after a good run.
+A **Problem** window shows the full text of the error. Press **Copy** to take it. The text is also in `last_job_error.txt`.
 
 ## Files
 
 | File | Use |
 |---|---|
-| `*.vproj` | Project file. It is plain text. |
-| `keybindings.ini` | All keys. The editor makes it at first start. Press `F5` to reload it. |
-| `cache\` | Rendered slow-mo files. You can delete it. |
+| `*.vproj` | Project file (plain text). |
+| `keybindings.ini` | All keys. Press `F5` to reload it. |
+| `cache\` | Rendered slow-mo and enhance files. You can delete it. |
 | `imgui.ini` | Window layout. Use **View > Reset layout** to restore it. |
+| `whisper.txt` | Auto-align settings. |
 
 ## Notes
 
-- Export opens one ffmpeg input for each clip. Many small clips make the export slow. Use slices of one beat or more.
-- `deps/odin-imgui` is a Git submodule. It holds the Dear ImGui bindings from `gitlab.com/L-4/odin-imgui`.
-- The bindings have one error in `imgui_impl_opengl3/imgui_impl_opengl3.odin`. The file `patches/odin-imgui-opengl3.patch` corrects it. `setup.ps1` applies it.
+- Export opens one ffmpeg input for each clip. Many small clips make it slow. Use slices of one beat or more.
+- `deps/odin-imgui` is a Git submodule (`gitlab.com/L-4/odin-imgui`).
+- The bindings have one error in `imgui_impl_opengl3/imgui_impl_opengl3.odin`. `patches/odin-imgui-opengl3.patch` fixes it. `setup.ps1` applies it.
