@@ -1,7 +1,9 @@
 package main
 
 import "core:fmt"
+import "core:hash"
 import "core:math"
+import "core:slice"
 
 import im "deps/odin-imgui"
 
@@ -87,7 +89,7 @@ Hit :: struct {
 // When the pattern hits inside [t0, t1): looped from the first step at/after t0, with
 // swing applied and muted lanes left out. The one source of slicing points: applying
 // a pattern and the randomizer both use it.
-pattern_hits :: proc(p: Project, pat: Pattern, t0, t1: f64) -> []Hit {
+pattern_hits :: proc(p: Project, pat: Pattern, t0, t1: f64, anchor := f64(-1)) -> []Hit {
 	s := p.settings
 	step := 60 / f64(max(s.bpm, 1)) / f64(max(pat.div, 1))
 	origin := beat_origin(s)
@@ -95,12 +97,13 @@ pattern_hits :: proc(p: Project, pat: Pattern, t0, t1: f64) -> []Hit {
 	swing := f64(clamp(pat.swing, 0, 75)) / 100
 	out := make([dynamic]Hit, context.temp_allocator)
 	first := int(math.ceil((t0 - origin) / step - 1e-6))
+	k0 := int(math.ceil(((anchor >= 0 ? anchor : t0) - origin) / step - 1e-6)) // the step where the pattern starts over
 	for n := 0; ; n += 1 {
 		k := first + n
 		t := origin + (f64(k) + (k % 2 != 0 ? swing : 0)) * step // swing delays the odd steps
 		if t >= t1 - CUT_EPS {break}
 		if t < t0 - CUT_EPS {continue}
-		idx := n % length
+		idx := ((k - k0) % length + length) % length
 		for li in 0 ..< int(pat.lane_count) {
 			lane := pat.lanes[li]
 			if !lane.mute && lane.steps[idx] != 0 {
@@ -114,9 +117,9 @@ pattern_hits :: proc(p: Project, pat: Pattern, t0, t1: f64) -> []Hit {
 
 // Slicing times for Randomize from a pattern's hits in [t0, t1): the hit times, and per
 // slot the layer (track) of the hit's lane if it has one, else PIN_NONE.
-pattern_slots :: proc(p: Project, pat: Pattern, t0, t1: f64, times: ^[dynamic]f64, pins: ^[dynamic]int) {
+pattern_slots :: proc(p: Project, pat: Pattern, t0, t1: f64, times: ^[dynamic]f64, pins: ^[dynamic]int, anchor := f64(-1)) {
 	layers := video_layers(p)
-	for h in pattern_hits(p, pat, t0, t1) {
+	for h in pattern_hits(p, pat, t0, t1, anchor) {
 		target := pat.lanes[h.lane].target
 		append(times, h.time)
 		append(pins, target > 0 && int(target) <= len(layers) ? layers[target - 1] : PIN_NONE)
@@ -130,7 +133,7 @@ parts_slots :: proc(p: Project, t0, t1: f64, times: ^[dynamic]f64, pins: ^[dynam
 		if part.pattern < 0 || int(part.pattern) >= len(p.patterns) || part.t1 <= t0 || part.t0 >= t1 {continue}
 		a, b := max(part.t0, t0), min(part.t1, t1)
 		n := len(times)
-		pattern_slots(p, p.patterns[part.pattern], a, b, times, pins)
+		pattern_slots(p, p.patterns[part.pattern], a, b, times, pins, part_anchor(part))
 		if len(times) > n {
 			append(times, b)
 			append(pins, PIN_SKIP)
@@ -138,11 +141,86 @@ parts_slots :: proc(p: Project, t0, t1: f64, times: ^[dynamic]f64, pins: ^[dynam
 	}
 }
 
+
+// ---------------------------------------------------------------- parts: always up to date
+
+// Painting is enough: the cuts inside a part are made from its pattern as soon as the part is made,
+// moved, resized, duplicated, repainted, or its pattern / the tempo changes. There is no apply step.
+// `synced` is what the cuts were last made from. Each frame the parts are compared with it; only
+// the parts that changed (and the ones they left) get new cuts, so cuts you made by hand in other
+// parts stay. Cuts inside a changed part belong to its pattern: a layer Randomize gave to a mark
+// is kept when the mark stays at the same time.
+Synced :: struct {
+	parts: [dynamic]Part,
+	env:   u64, // patterns and tempo
+}
+
+synced: Synced
+
+parts_env_hash :: proc() -> u64 {
+	s := project.settings
+	tempo := [2]f64{f64(s.bpm), f64(s.grid_offset)}
+	h := hash.fnv64a(slice.to_bytes(project.patterns[:]))
+	return hash.fnv64a(slice.to_bytes(tempo[:]), h)
+}
+
+// The cuts are taken as right (after load, undo, redo): no new cuts for the parts as they are.
+parts_mark_synced :: proc() {
+	assign(&synced.parts, project.parts[:])
+	synced.env = parts_env_hash()
+}
+
+in_part :: proc(parts: []Part, t: f64) -> bool {
+	for part in parts {
+		if t >= part.t0 - CUT_EPS && t < part.t1 - CUT_EPS {return true}
+	}
+	return false
+}
+
+parts_sync :: proc() {
+	env := parts_env_hash()
+	if env == synced.env && slice.equal(synced.parts[:], project.parts[:]) {return}
+	all := env != synced.env
+	gone := make([dynamic]Part, context.temp_allocator) // parts that were there (or changed): their cuts go
+	fresh := make([dynamic]Part, context.temp_allocator) // parts that need new cuts
+	for part in synced.parts {
+		if all || !slice.contains(project.parts[:], part) {append(&gone, part)}
+	}
+	for part in project.parts {
+		if all || !slice.contains(synced.parts[:], part) {append(&fresh, part)}
+	}
+	clear_ranges := make([dynamic]Part, context.temp_allocator)
+	append(&clear_ranges, ..gone[:])
+	append(&clear_ranges, ..fresh[:])
+	old := make([dynamic]Cut, context.temp_allocator)
+	#reverse for c, i in project.program {
+		if c.time > CUT_EPS && in_part(clear_ranges[:], c.time) {
+			append(&old, c)
+			ordered_remove(&project.program, i)
+		}
+	}
+	for part in fresh {
+		if part.pattern >= 0 && int(part.pattern) < len(project.patterns) {
+			program_apply_pattern(&project, project.patterns[part.pattern], part.t0, part.t1, false, part_anchor(part))
+		}
+	}
+	for &c in project.program { // a layer given to a mark stays
+		if c.fixed || !in_part(fresh[:], c.time) {continue}
+		for o in old {
+			if abs(o.time - c.time) <= CUT_EPS {
+				c.layer, c.fixed = o.layer, o.fixed
+				break
+			}
+		}
+	}
+	parts_mark_synced()
+}
+
 // Applies the pattern of every part inside its own range. Returns how many parts.
 apply_parts :: proc() -> (n: int) {
 	for part in project.parts {
 		if part.pattern >= 0 && int(part.pattern) < len(project.patterns) {
-			program_apply_pattern(&project, project.patterns[part.pattern], part.t0, part.t1, true)
+			program_apply_pattern(&project, project.patterns[part.pattern], part.t0, part.t1, true, part_anchor(part))
 			n += 1
 		}
 	}
@@ -151,7 +229,7 @@ apply_parts :: proc() -> (n: int) {
 
 // Cuts the program at every hit of the pattern inside [t0, t1) and sets the layers
 // the lanes target. replace: the cuts already in the range are removed first.
-program_apply_pattern :: proc(p: ^Project, pat: Pattern, t0, t1: f64, replace: bool) {
+program_apply_pattern :: proc(p: ^Project, pat: Pattern, t0, t1: f64, replace: bool, anchor := f64(-1)) {
 	layers := video_layers(p^)
 	if replace {
 		#reverse for c, i in p.program {
@@ -160,7 +238,7 @@ program_apply_pattern :: proc(p: ^Project, pat: Pattern, t0, t1: f64, replace: b
 			}
 		}
 	}
-	for h in pattern_hits(p^, pat, t0, t1) {
+	for h in pattern_hits(p^, pat, t0, t1, anchor) {
 		t, target := h.time, pat.lanes[h.lane].target
 		if target > 0 && int(target) <= len(layers) {
 			layer := layers[target - 1]

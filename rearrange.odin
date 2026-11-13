@@ -128,13 +128,18 @@ rearrange :: proc(p: ^Project, o: Rand_Options, cands: []int, times: []f64, pins
 		}
 
 		pool := make([dynamic]int, context.temp_allocator) // clips that can fill this slot
+		weight := make([dynamic]f64, context.temp_allocator) // how likely each is: equal turns, or by how much footage the clip has left (spread)
 		for k in 0 ..< len(cands) {
 			c := p.clips[cands[k]]
 			if pin >= 0 && c.track != pin {continue}
 			if same_time {
-				if a >= c.start - 1e-6 && b <= clip_end(c) + 1e-6 {append(&pool, k)}
+				if a >= c.start - 1e-6 && b <= clip_end(c) + 1e-6 {
+					append(&pool, k)
+					append(&weight, 1)
+				}
 			} else if bags[k][cls].head < len(bags[k][cls].items) {
 				append(&pool, k)
+				append(&weight, o.spread ? f64(len(bags[k][cls].items) - bags[k][cls].head) : 1)
 			}
 		}
 		if len(pool) == 0 {
@@ -142,9 +147,25 @@ rearrange :: proc(p: ^Project, o: Rand_Options, cands: []int, times: []f64, pins
 			continue
 		}
 		if o.max_run > 0 && run >= int(o.max_run) && len(pool) > 1 {
-			if j, ok := slice.linear_search(pool[:], prev); ok {unordered_remove(&pool, j)}
+			if j, ok := slice.linear_search(pool[:], prev); ok {
+				unordered_remove(&pool, j)
+				unordered_remove(&weight, j)
+			}
 		}
-		k := pool[rand.int_max(len(pool))] // equal turns
+		// Equal turns make the short clips run out early, so the later slots only have the long ones. Picking by
+		// how much footage a clip has left makes every clip play at the same rate over the whole length (spread).
+		sum := 0.0
+		for w in weight {sum += w}
+		pick := rand.float64() * sum
+		pi := len(pool) - 1
+		for w, q in weight {
+			pick -= w
+			if pick < 0 {
+				pi = q
+				break
+			}
+		}
+		k := pool[pi]
 
 		src_in: f64
 		if same_time {
@@ -227,7 +248,7 @@ take_locked :: proc(p: ^Project) -> []Clip {
 //   same time  the next clip that covers the slice's time
 //   in order   the next piece of the same clip
 //   any piece  a random piece of a random clip
-// The slice is locked afterwards: you picked it. Returns false when nothing could change.
+// The slice is not locked: lock it (k) to keep it through Randomize. Returns false when nothing could change.
 slice_nudge :: proc(p: ^Project, ci: int, dir: int, mode: Rand_Footage) -> bool {
 	c := &p.clips[ci]
 	if c.kind != .Video || !c.slice {return false}
@@ -270,7 +291,6 @@ slice_nudge :: proc(p: ^Project, ci: int, dir: int, mode: Rand_Footage) -> bool 
 		c.source, c.speed, c.pos, c.scale, c.rotation = o.source, o.speed, o.pos, o.scale, o.rotation
 		c.in_point = o.in_point + f64(rand.int_max(pieces)) * c.duration * o.speed
 	}
-	c.locked = true
 	return true
 }
 

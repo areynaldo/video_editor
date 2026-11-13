@@ -55,11 +55,16 @@ PRERENDER_TITLE := [Prerender_Mode]string{.Slowmo = "Rendering smooth slow-mo", 
 DENOISE :: "hqdn3d=1.5:1.5:4:4"
 SHARPEN :: "unsharp=5:5:0.7,eq=saturation=1.08"
 
+count_files :: proc(dir: string) -> int {
+	infos, err := os.read_directory_by_path(dir, -1, context.temp_allocator)
+	return err == nil ? len(infos) : 0
+}
+
 // The frame-folder way (RIFE, Real-ESRGAN): ffmpeg cuts the clip into image files, each ML
 // stage makes new files from the ones before, ffmpeg joins the last ones into `out`.
 // `retime` is the ffmpeg filter that makes the first frames. `stages` are the ML commands
 // with {in} and {out} where the folders go; `counts[i]` = how many files stage i makes (for
-// the bar). The frames are high quality jpg: png costs far more time (every frame is
+// the bar). The frames are png (no loss between the steps; jpg lost quality at every one). The cut uses the fastest png setting (every frame is
 // encoded and decoded by the CPU, and a 4K png takes a good part of a second).
 // Returns how long each step took (to see what is slow), and an error text.
 frames_pipeline :: proc(c: Clip, src, out, tag: string, fps: int, retime: string, stages: [][]string, counts: []int) -> (timings, err: string) {
@@ -78,7 +83,7 @@ frames_pipeline :: proc(c: Clip, src, out, tag: string, fps: int, retime: string
 	}
 
 	job_step("cutting the clip into frames ...")
-	if msg := ffmpeg_tracked({"-ss", fmt.tprintf("%.3f", c.in_point), "-t", fmt.tprintf("%.3f", c.duration * c.speed), "-i", src, "-an", "-fps_mode", "passthrough", "-vf", retime, "-q:v", "1", strings.concatenate({dirs[0], "\\%08d.jpg"}, context.temp_allocator)}, c.duration, 0, 0.08); msg != "" {
+	if msg := ffmpeg_tracked({"-ss", fmt.tprintf("%.3f", c.in_point), "-t", fmt.tprintf("%.3f", c.duration * c.speed), "-i", src, "-an", "-fps_mode", "passthrough", "-vf", retime, "-pix_fmt", "rgb24", "-compression_level", "1", strings.concatenate({dirs[0], "\\%08d.png"}, context.temp_allocator)}, c.duration, 0, 0.08); msg != "" {
 		return "", msg
 	}
 	note(&tb, &lap, "cut")
@@ -96,11 +101,26 @@ frames_pipeline :: proc(c: Clip, src, out, tag: string, fps: int, retime: string
 		if msg := run_tracked(cmd[:], {.Frames, dirs[i + 1], f64(counts[i])}, lo, lo + share); msg != "" {
 			return "", msg
 		}
+		// the tools can end "fine" with frames missing (the GPU ran out of memory): once more with one frame at a time
+		if made := count_files(dirs[i + 1]); made < counts[i] {
+			for k in 0 ..< len(cmd) - 1 {
+				if cmd[k] == "-j" {cmd[k + 1] = "1:1:1"}
+			}
+			job_step("%s ran short of memory: trying again, one frame at a time ...", name)
+			os.remove_all(dirs[i + 1])
+			_ = os.make_directory(dirs[i + 1])
+			if msg := run_tracked(cmd[:], {.Frames, dirs[i + 1], f64(counts[i])}, lo, lo + share); msg != "" {
+				return "", msg
+			}
+			if made = count_files(dirs[i + 1]); made < counts[i] {
+				return "", fmt.tprintf("%s made %d of %d frames. The GPU has too little memory for frames this big: use a smaller project size, or close other programs that use the GPU.", name, made, counts[i])
+			}
+		}
 		note(&tb, &lap, name)
 		os.remove_all(dirs[i]) // the frames before this stage are not needed any more
 	}
 	job_step("encoding the video ...")
-	if msg := ffmpeg_tracked({"-framerate", fmt.tprintf("%d", fps), "-i", strings.concatenate({dirs[len(stages)], "\\%08d.jpg"}, context.temp_allocator), "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", out}, f64(counts[len(counts) - 1]) / f64(fps), 0.88, 1); msg != "" {
+	if msg := ffmpeg_tracked({"-framerate", fmt.tprintf("%d", fps), "-i", strings.concatenate({dirs[len(stages)], "\\%08d.png"}, context.temp_allocator), "-c:v", "libx264", "-crf", "12", "-preset", "medium", "-pix_fmt", "yuv420p", out}, f64(counts[len(counts) - 1]) / f64(fps), 0.88, 1); msg != "" {
 		return "", msg
 	}
 	note(&tb, &lap, "encode")
@@ -137,7 +157,7 @@ render_segments :: proc(c: Clip, src, out: string, fps: int, pre, tail: string) 
 			)
 		cmd := make([dynamic]string, context.temp_allocator)
 		append(&cmd, "ffmpeg", "-y", "-v", "error", "-nostdin", "-progress", files[j], "-ss", fmt.tprintf("%.3f", src_start), "-t", fmt.tprintf("%.3f", src_len), "-i", src, "-an", "-vf", vf)
-		append(&cmd, "-c:v", "libx264", "-crf", "16", "-preset", "medium", "-pix_fmt", "yuv420p", segs[j])
+		append(&cmd, "-c:v", "libx264", "-crf", "12", "-preset", "medium", "-pix_fmt", "yuv420p", segs[j])
 		cmds[j] = cmd[:]
 		f0 = f1
 	}
@@ -176,13 +196,13 @@ upscale_factor :: proc(src_h, canvas_h: int) -> int {
 // Renders clip c (video) into `out` as the mode asks. `up` = upscale factor (see
 // upscale_factor). The clip's speed is applied, so the file plays at speed 1.
 // Returns what was used (with the time of each step), or an error text.
-render_clip :: proc(mode: Prerender_Mode, c: Clip, src, out: string, fps, up: int) -> (engine, err: string) {
+render_clip :: proc(mode: Prerender_Mode, c: Clip, src, out: string, fps, up: int, cap_w, cap_h: int) -> (engine, err: string) {
 	rife, esr := find_rife(), find_esrgan()
 	span := c.duration * c.speed
 	frames_in := int(math.round(span * f64(fps))) // frames cut from the source
 	target := max(int(math.round(f64(frames_in) / c.speed)), frames_in + 1) // frames after interpolation
 	rife_cmd := make([dynamic]string, context.temp_allocator)
-	append(&rife_cmd, rife, "-i", "{in}", "-o", "{out}", "-n", fmt.tprintf("%d", target), "-f", "%08d.jpg", "-j", "4:3:4") // -f is a file name pattern for rife (for Real-ESRGAN it is the format)
+	append(&rife_cmd, rife, "-i", "{in}", "-o", "{out}", "-n", fmt.tprintf("%d", target), "-f", "%08d.png", "-j", "2:2:2") // -f is a file name pattern for rife (for Real-ESRGAN it is the format)
 	for dir in ([?]string{"tools\\rife-v4.6", "rife-v4.6"}) {
 		if os.exists(dir) {append(&rife_cmd, "-m", dir); break}
 	}
@@ -192,14 +212,17 @@ render_clip :: proc(mode: Prerender_Mode, c: Clip, src, out: string, fps, up: in
 		if os.exists(f) {model = "realesr-general-x4v3"; break} // small, for general footage
 	}
 	esr_cmd := make([dynamic]string, context.temp_allocator)
-	append(&esr_cmd, esr, "-i", "{in}", "-o", "{out}", "-n", model, "-s", fmt.tprintf("%d", up), "-f", "jpg", "-j", "3:2:3")
+	append(&esr_cmd, esr, "-i", "{in}", "-o", "{out}", "-n", model, "-s", fmt.tprintf("%d", up), "-f", "png", "-j", "3:2:3")
 	append(&esr_cmd, ..gpu_args())
+	// Frames bigger than the picture are shrunk first (smaller ones are left alone): the export would shrink
+	// them anyway, and 4K frames do not fit in the GPU memory of RIFE and take four times as long.
+	fit_down := fmt.tprintf("scale=w='min(iw,%d)':h='min(ih,%d)':force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos", cap_w, cap_h)
 	scale := up > 1 ? fmt.tprintf("scale=iw*%d:ih*%d:flags=lanczos,", up, up) : ""
 
 	switch mode {
 	case .Slowmo:
 		if rife != "" {
-			t, msg := frames_pipeline(c, src, out, "rife", fps, "null", {rife_cmd[:]}, {target})
+			t, msg := frames_pipeline(c, src, out, "rife", fps, fit_down, {rife_cmd[:]}, {target})
 			return fmt.tprintf("RIFE (%s)", t), msg
 		}
 		n, msg := render_segments(c, src, out, fps, "", "")
@@ -214,13 +237,13 @@ render_clip :: proc(mode: Prerender_Mode, c: Clip, src, out: string, fps, up: in
 		// no upscaling needed (or no ML tool): denoise, sharpen and fix the levels in one ffmpeg pass
 		vf := fmt.tprintf("%s,%s%s,normalize=smoothing=30", retime, scale, SHARPEN)
 		job_step("cleaning with ffmpeg ...")
-		if msg := ffmpeg_tracked({"-ss", fmt.tprintf("%.3f", c.in_point), "-t", fmt.tprintf("%.3f", span), "-i", src, "-an", "-vf", vf, "-c:v", "libx264", "-crf", "16", "-preset", "medium", "-pix_fmt", "yuv420p", out}, c.duration, 0, 1); msg != "" {
+		if msg := ffmpeg_tracked({"-ss", fmt.tprintf("%.3f", c.in_point), "-t", fmt.tprintf("%.3f", span), "-i", src, "-an", "-vf", vf, "-c:v", "libx264", "-crf", "12", "-preset", "medium", "-pix_fmt", "yuv420p", out}, c.duration, 0, 1); msg != "" {
 			return "", msg
 		}
 		return up > 1 ? fmt.tprintf("ffmpeg %dx (no Real-ESRGAN in tools)", up) : "ffmpeg (denoise, sharpen, levels; the source is big enough, no upscaling)", ""
 	case .Both:
 		// denoise first (cheap, and cleaner frames make better in-between frames), interpolate, upscale last (only if needed)
-		retime := DENOISE // the source's own frames go to RIFE: resampling them to the project fps would repeat frames and RIFE would "move" between copies (stutter)
+		retime := strings.concatenate({fit_down, ",", DENOISE}, context.temp_allocator) // the source's own frames go to RIFE: resampling them to the project fps would repeat frames and RIFE would "move" between copies (stutter)
 		if rife != "" && (esr != "" || up == 1) {
 			stages: [][]string = up > 1 ? {rife_cmd[:], esr_cmd[:]} : {rife_cmd[:]}
 			counts: []int = up > 1 ? {target, target} : {target}
@@ -240,6 +263,7 @@ Slow_Task :: struct {
 	out:    string, // heap: the cache file (absolute)
 	source: Source, // the rendered file, probed (heap strings)
 	up:     int, // upscale factor the clip needs
+	cap_w, cap_h: int, // frames bigger than this are shrunk before the ML tools: the picture size times the clip zoom
 	ok:     bool,
 }
 
@@ -259,9 +283,9 @@ prerender :: proc(p: ^Project, mode: Prerender_Mode) {
 	for c, i in p.clips {
 		if !c.selected || c.kind != .Video || (mode != .Enhance && c.speed >= 0.99) {continue}
 		// the tools are part of the name: a file made by ffmpeg must not be taken for a RIFE render
-		name := fmt.tprintf("%s\\%s%s%s_%d_%d_%d_%d.mp4", CACHE_DIR, PRERENDER_TAG[mode], find_rife() != "" ? "_rife" : "", find_esrgan() != "" ? "_esr" : "", c.source, int(c.in_point * 1000), int(c.duration * c.speed * 1000), int(c.speed * 1000))
+		name := fmt.tprintf("%s\\%s%s%s_hq_%d_%d_%d_%d.mp4", CACHE_DIR, PRERENDER_TAG[mode], find_rife() != "" ? "_rife" : "", find_esrgan() != "" ? "_esr" : "", c.source, int(c.in_point * 1000), int(c.duration * c.speed * 1000), int(c.speed * 1000))
 		full, _ := filepath.abs(name, context.temp_allocator)
-		append(&d.tasks, Slow_Task{up = upscale_factor(p.sources[c.source].height, int(p.settings.height)), mode = mode, clip = i, c = c, src = strings.clone(p.sources[c.source].path), out = strings.clone(full)})
+		append(&d.tasks, Slow_Task{cap_w = int(f64(p.settings.width) * f64(max(c.scale, 1))), cap_h = int(f64(p.settings.height) * f64(max(c.scale, 1))), up = upscale_factor(p.sources[c.source].height, int(p.settings.height)), mode = mode, clip = i, c = c, src = strings.clone(p.sources[c.source].path), out = strings.clone(full)})
 	}
 	if len(d.tasks) == 0 {
 		set_status(mode == .Enhance ? "enhance: select video clips" : "slow-mo: select video clips that are slowed down (shift+drag an edge stretches a clip)")
@@ -283,7 +307,7 @@ slow_work :: proc(data: rawptr) {
 		}
 		if !os.exists(t.out) {
 			job_step("clip %d of %d ...", i + 1, n)
-			engine, err := render_clip(t.mode, t.c, t.src, t.out, d.fps, t.up)
+			engine, err := render_clip(t.mode, t.c, t.src, t.out, d.fps, t.up, t.cap_w, t.cap_h)
 			if err != "" {
 				os.remove(t.out) // a half written file must not stay in the cache
 				d.err = strings.clone(err)

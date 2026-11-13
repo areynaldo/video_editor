@@ -8,9 +8,9 @@ import "core:strings"
 
 import im "deps/odin-imgui"
 
-TRACK_H :: 40
+track_h: f32 = 40 // lane height; alt+wheel changes it
 RULER_H :: 20
-PART_H :: 16 // the parts row under the ruler
+PART_H :: 24 // the parts row under the ruler
 PROG_Y :: RULER_H + PART_H
 PROG_H :: 26 // the program lane under the parts row
 LYR_Y :: PROG_Y + PROG_H // the lyrics row under the program lane
@@ -37,6 +37,9 @@ Drag :: enum {
 	Cut_Move, // dragging a program cut
 	Prog_Range, // dragging over program segments to select a range
 	Part_Create, // dragging out a part in the parts row
+	Part_Move, // dragging a part, or one of its edges
+	Part_Trim_L,
+	Part_Trim_R,
 	Lyric_Move, // dragging a lyric line, or one of its edges
 	Lyric_Trim_L,
 	Lyric_Trim_R,
@@ -57,6 +60,8 @@ box_y0: f32 // screen y where a box selection started
 box_base: [dynamic]bool // what was selected before a ctrl box (clips or lyric lines)
 prev_scroll_y: f32 // the timeline's vertical scroll before the wheel acted on a slice
 part_drag_t: f64 // the free end of a part being dragged out
+part_len: f64 // length of the part being moved
+part_anchor_off: f64 // where its pattern starts, counted from its start
 
 select_cuts :: proc(a, b: int) {
 	sel_cut, sel_cut2 = min(a, b), max(a, b)
@@ -100,7 +105,7 @@ brush_strip :: proc() {
 		im.PopStyleVar()
 		if picked {im.PopStyleColor()}
 		im.PopStyleColor(2)
-		tip("Brush: drag in the parts row to paint it. Ctrl+click a part to repaint it.")
+		tip("Brush: drag in the parts row to paint a part. Painting over other parts overwrites them and splits them (the rest stays). To move a part drag its top strip (where the name is). Drag an edge to cut or extend it (the pattern stays in place). The pattern of a part changes with right-click.")
 	}
 }
 
@@ -112,16 +117,83 @@ part_at :: proc(t: f64) -> int {
 	return -1
 }
 
-// Adds a part over a..b with the current pattern; parts it overlaps are replaced.
-make_part :: proc(a, b: f64) {
+// A copy of part i right after it (painted over what is there), selected. Repeat it to repeat the pattern.
+duplicate_part :: proc(i: int) {
+	if i < 0 || i >= len(project.parts) {return}
+	pt := project.parts[i]
+	make_part(pt.t1, pt.t1 + (pt.t1 - pt.t0), pt.pattern, pt.t1 + (part_anchor(pt) - pt.t0)) // same phase as the original
+	sel_part = part_at(pt.t1 + 1e-3)
+}
+
+// Cuts part i in two at time t.
+split_part :: proc(i: int, t: f64) -> bool {
+	if i < 0 || i >= len(project.parts) {return false}
+	pt := project.parts[i]
+	if t <= pt.t0 + MIN_DURATION || t >= pt.t1 - MIN_DURATION {return false}
+	project.parts[i].t1 = t
+	inject_at(&project.parts, i + 1, Part{t0 = t, t1 = pt.t1, pattern = pt.pattern, anchor = part_anchor(pt)})
+	return true
+}
+
+// The room around part i: it may grow or move between the end of the part before and the start of the next.
+part_room :: proc(i: int) -> (lo, hi: f64) {
+	lo, hi = 0, max(f64)
+	if i > 0 {lo = project.parts[i - 1].t1}
+	if i + 1 < len(project.parts) {hi = project.parts[i + 1].t0}
+	return
+}
+
+// Adds a part over a..b with the current pattern, painted over what is there: parts it overlaps
+// are cut back (or split in two), not thrown away.
+make_part :: proc(a, b: f64, with: i32 = -2, anchor := f64(-1)) {
 	if b - a < 1e-3 {return}
 	#reverse for part, i in project.parts {
-		if part.t0 < b && part.t1 > a {ordered_remove(&project.parts, i)}
+		if part.t0 >= b || part.t1 <= a {continue}
+		if part.t0 < a && part.t1 > b { // painted in the middle: two pieces are left
+			project.parts[i].t1 = a
+			append(&project.parts, Part{t0 = b, t1 = part.t1, pattern = part.pattern, anchor = part_anchor(part)})
+		} else if part.t0 < a {
+			project.parts[i].t1 = a
+		} else if part.t1 > b {
+			project.parts[i].anchor = part_anchor(part) // the start is cut: what is left stays where it was
+			project.parts[i].t0 = b
+		} else {
+			ordered_remove(&project.parts, i)
+		}
 	}
-	pattern := len(project.patterns) > 0 ? project.settings.pattern_sel : -1
-	append(&project.parts, Part{a, b, pattern})
+	pattern := with >= -1 ? with : (len(project.patterns) > 0 ? project.settings.pattern_sel : -1)
+	append(&project.parts, Part{t0 = a, t1 = b, pattern = pattern, anchor = anchor >= 0 ? anchor : a})
 	slice.sort_by(project.parts[:], proc(x, y: Part) -> bool {return x.t0 < y.t0})
 	sel_part = part_at((a + b) / 2)
+}
+
+// Double click on a part: its pattern, start, end and length in numbers (for small timing changes).
+part_edit_popup :: proc() {
+	if !im.BeginPopup("##partedit") {return}
+	defer im.EndPopup()
+	if sel_part < 0 || sel_part >= len(project.parts) {
+		im.CloseCurrentPopup()
+		return
+	}
+	lo, hi := part_room(sel_part)
+	pt := &project.parts[sel_part]
+	im.TextDisabled("part")
+	beat := 60 / f64(max(project.settings.bpm, 1))
+	start, end, length := pt.t0, pt.t1, pt.t1 - pt.t0
+	im.SetNextItemWidth(160)
+	if im.InputDouble("start (s)", &start, 0.05, 0.5, "%.3f") {pt.t0 = clamp(start, lo, pt.t1 - MIN_DURATION)}
+	im.SetNextItemWidth(160)
+	if im.InputDouble("end (s)", &end, 0.05, 0.5, "%.3f") {pt.t1 = clamp(end, pt.t0 + MIN_DURATION, hi)}
+	im.SetNextItemWidth(160)
+	if im.InputDouble("length (s)", &length, 0.05, 0.5, "%.3f") {pt.t1 = clamp(pt.t0 + length, pt.t0 + MIN_DURATION, hi)}
+	dim_f("%.2f beats", (pt.t1 - pt.t0) / beat)
+	if im.Button("Duplicate") {duplicate_part(sel_part)}
+	im.SameLine()
+	if im.Button("Remove") {
+		ordered_remove(&project.parts, sel_part)
+		sel_part = -1
+		im.CloseCurrentPopup()
+	}
 }
 
 // The selected program range: from the first selected segment's start to the last one's end.
@@ -159,11 +231,11 @@ x_to_time :: proc(origin, x: f32) -> f64 {
 
 // Higher tracks are drawn higher up.
 track_to_y :: proc(top: f32, track: int) -> f32 {
-	return top + LANES_Y + f32(project.track_count - 1 - track) * TRACK_H
+	return top + LANES_Y + f32(project.track_count - 1 - track) * track_h
 }
 
 y_to_track :: proc(top, y: f32) -> int {
-	row := int(max(0, y - top - LANES_Y) / TRACK_H)
+	row := int(max(0, y - top - LANES_Y) / track_h)
 	return clamp(project.track_count - 1 - row, 0, max(project.track_count - 1, 0))
 }
 
@@ -294,7 +366,7 @@ tools_column :: proc() {
 
 timeline :: proc() {
 	length := max(project_length(project) + 10, 30)
-	size := im.Vec2{f32(length) * zoom, LANES_Y + TRACK_H * f32(max(project.track_count, 4))}
+	size := im.Vec2{f32(length) * zoom, LANES_Y + track_h * f32(max(project.track_count, 4))}
 
 	im.BeginChild("timeline", {0, 0}, {.Borders}, {.HorizontalScrollbar, .NoNavInputs, .NoNavFocus}) // no keyboard nav: it would scroll the big canvas item into view
 	defer im.EndChild()
@@ -307,6 +379,7 @@ timeline :: proc() {
 	p0 := im.GetCursorScreenPos()
 	im.InvisibleButton("area", size)
 	sx := im.GetScrollX()
+	sy := im.GetScrollY() // the ruler is drawn at the top of the window, not of the lanes
 
 	// drop media from the Media panel
 	mouse := im.GetMousePos()
@@ -344,9 +417,12 @@ timeline :: proc() {
 		if io.KeyCtrl && io.MouseWheel != 0 {
 			zoom_at(p0.x, sx, mouse.x, io.MouseWheel > 0 ? 1.25 : 0.8)
 		}
-		// the wheel on a slice switches its footage (and locks it)
-		if hover >= 0 && !io.KeyCtrl && io.MouseWheel != 0 && project.clips[hover].slice {
-			dir := io.MouseWheel < 0 ? 1 : -1
+		// the wheel on a slice rerolls its footage (the selected slices if the pointer is over one of them)
+		if io.KeyAlt && !io.KeyCtrl && io.MouseWheel != 0 {
+				track_h = clamp(track_h * (io.MouseWheel > 0 ? 1.15 : 1 / 1.15), 18, 160) // alt+wheel: taller / shorter lanes
+				im.SetScrollY(prev_scroll_y)
+			} else if hover >= 0 && !io.KeyCtrl && io.MouseWheel != 0 && project.clips[hover].slice {
+			dir := 0 // reroll: a different piece each notch
 			// every selected slice changes together when the wheel is over a selected one
 			n := 0
 			if project.clips[hover].selected {
@@ -357,7 +433,7 @@ timeline :: proc() {
 				n = 1
 			}
 			if n > 0 {
-				set_status("%d slice%s: %s footage, locked", n, n == 1 ? "" : "s", dir > 0 ? "next" : "previous")
+				set_status("%d slice%s rerolled", n, n == 1 ? "" : "s")
 			} else {
 				set_status("no other footage for this slice")
 			}
@@ -374,7 +450,7 @@ timeline :: proc() {
 	// Right-click: context menu for what is under the mouse
 	if im.IsItemClicked(.Right) && !in_header {
 		switch {
-		case mouse.y < p0.y + RULER_H:
+		case mouse.y < p0.y + sy + RULER_H:
 		case mouse.y < p0.y + PROG_Y: // parts row
 			if hit := part_at(t_mouse); hit >= 0 {
 				select_none()
@@ -406,7 +482,7 @@ timeline :: proc() {
 			clear_track_selection(&project)
 			clear_cut_sel()
 			open_context(.Clip, t_mouse, project.clips[hover].track)
-		case mouse.y < p0.y + LANES_Y + f32(project.track_count) * TRACK_H:
+		case mouse.y < p0.y + LANES_Y + f32(project.track_count) * track_h:
 			track := y_to_track(p0.y, mouse.y)
 			if !track_has(project, track, .Selected) {
 				select_track(track, false, false)
@@ -415,19 +491,49 @@ timeline :: proc() {
 		}
 	}
 
+	// the pointer shows what a part's edge or body does
+	if canvas_hovered && !in_header && (drag == .None || drag == .Part_Trim_L || drag == .Part_Trim_R) && mouse.y >= p0.y + sy + RULER_H && mouse.y >= p0.y + RULER_H && mouse.y < p0.y + PROG_Y {
+		if hit := part_at(t_mouse); hit >= 0 {
+			pt := project.parts[hit]
+			near := mouse.x < time_to_x(p0.x, pt.t0) + EDGE_PX || mouse.x > time_to_x(p0.x, pt.t1) - EDGE_PX
+			im.SetMouseCursor(near ? .ResizeEW : .ResizeAll)
+		}
+	}
+
 	// Press
 	if im.IsItemClicked() && !in_header {
 		track := y_to_track(p0.y, mouse.y)
 		switch {
-		case mouse.y < p0.y + RULER_H:
+		case mouse.y < p0.y + sy + RULER_H:
 			drag = .Scrub
 		case mouse.y < p0.y + PROG_Y:
 			// parts row: click a part to select it, drag on empty space to make one
 			select_none()
 			if hit := part_at(t_mouse); hit >= 0 {
 				sel_part = hit
+				project.parts[hit].anchor = part_anchor(project.parts[hit]) // from here the place of the pattern is fixed
+				pt := project.parts[hit]
+				drag_cut, drag_press_t, drag_ref, part_len = hit, t_mouse, pt.t0, pt.t1 - pt.t0
+				part_anchor_off = pt.anchor - pt.t0
+				if im.IsMouseDoubleClicked(.Left) {
+					drag = .None
+					im.OpenPopup("##partedit") // double click: edit the part
+				} else if mouse.x < time_to_x(p0.x, pt.t0) + EDGE_PX {
+					drag = .Part_Trim_L
+				} else if mouse.x > time_to_x(p0.x, pt.t1) - EDGE_PX {
+					drag, drag_ref = .Part_Trim_R, pt.t1
+				} else if mouse.y < p0.y + RULER_H + 12 {
+					drag = .Part_Move // the top strip moves the part
+				} else { // the rest paints over it with the brush (a click only selects)
+					drag, drag_ref, part_drag_t = .Part_Create, snap(max(0, t_mouse)), snap(max(0, t_mouse))
+				}
+			} else if im.IsMouseDoubleClicked(.Left) { // double click on free space: fill the gap with the brush
+				lo, hi := 0.0, max(project_length(project), t_mouse)
+				for part in project.parts {
+					if part.t1 <= t_mouse {lo = max(lo, part.t1)} else if part.t0 > t_mouse {hi = min(hi, part.t0)}
+				}
+				make_part(lo, hi)
 				drag = .None
-				if io.KeyCtrl && len(project.patterns) > 0 {project.parts[hit].pattern = project.settings.pattern_sel} // repaint
 			} else {
 				drag, drag_ref, part_drag_t = .Part_Create, snap(max(0, t_mouse)), snap(max(0, t_mouse))
 			}
@@ -510,7 +616,7 @@ timeline :: proc() {
 			// empty lane space: pick the layer (ctrl: toggle, shift: range), move the checkpoint; dragging makes a box
 			clear(&box_base)
 			for c in project.clips {append(&box_base, io.KeyCtrl && c.selected)}
-			if mouse.y < p0.y + LANES_Y + f32(project.track_count) * TRACK_H {
+			if mouse.y < p0.y + LANES_Y + f32(project.track_count) * track_h {
 				select_track(track, io.KeyCtrl, io.KeyShift)
 			} else {
 				clear_selection(&project)
@@ -551,6 +657,19 @@ timeline :: proc() {
 				playing = false
 			case .Part_Create:
 				part_drag_t = snap(max(0, t_mouse))
+			case .Part_Move, .Part_Trim_L, .Part_Trim_R:
+				if drag_cut < len(project.parts) {
+					lo, hi := part_room(drag_cut)
+					pt := &project.parts[drag_cut]
+					#partial switch drag {
+					case .Part_Move:
+						pt.t0 = clamp(target, lo, max(hi - part_len, lo))
+						pt.t1 = pt.t0 + part_len
+						pt.anchor = pt.t0 + part_anchor_off // the pattern moves with it
+					case .Part_Trim_L: pt.t0 = clamp(target, lo, pt.t1 - MIN_DURATION)
+					case .Part_Trim_R: pt.t1 = clamp(target, pt.t0 + MIN_DURATION, hi)
+					}
+				}
 			case .Lyric_Move: // the whole selection moves with the line you hold
 				if drag_cut < len(project.lyrics) {lyrics_shift(target - project.lyrics[drag_cut].t0)}
 			case .Lyric_Trim_L, .Lyric_Trim_R:
@@ -613,34 +732,16 @@ timeline :: proc() {
 		}
 	}
 
-	// Ruler: ticks every second, m:ss labels spaced so they never touch
-	im.DrawList_AddRectFilled(dl, p0, {p0.x + size.x, p0.y + RULER_H}, 0xFF303030)
-	cx := time_to_x(p0.x, checkpoint) // checkpoint marker: where a double-tapped play returns to
-	im.DrawList_AddTriangleFilled(dl, {cx - 5, p0.y}, {cx + 5, p0.y}, {cx, p0.y + 9}, 0xFF40C0FF)
-	label_step := 1
-	for s in ([?]int{1, 2, 5, 10, 15, 30, 60, 120, 300, 600}) {
-		label_step = s
-		if f32(s) * zoom >= 64 {break}
-	}
-	for s in 0 ..< int(length) {
-		x := time_to_x(p0.x, f64(s))
-		big := s % label_step == 0
-		im.DrawList_AddLine(dl, {x, p0.y + RULER_H - (big ? 9 : 5)}, {x, p0.y + RULER_H}, 0xFF909090)
-		if big {
-			im.DrawList_AddText(dl, {x + 3, p0.y + 2}, 0xFFC0C0C0, cstr(fmt.tprintf("%d:%02d", s / 60, s % 60)))
-		}
-	}
-
 	// Lanes
 	rows := max(project.track_count, 4)
 	for r in 0 ..< rows { // rows from the top; the bottom ones may be empty filler below the last track
-		y := p0.y + LANES_Y + f32(r) * TRACK_H
+		y := p0.y + LANES_Y + f32(r) * track_h
 		track := project.track_count - 1 - r
 		col: u32 = r % 2 == 0 ? 0xFF202020 : 0xFF262626
 		if track_has(project, track, .Selected) {
 			col = 0xFF4A3A20
 		}
-		im.DrawList_AddRectFilled(dl, {p0.x, y}, {p0.x + size.x, y + TRACK_H - 1}, col)
+		im.DrawList_AddRectFilled(dl, {p0.x, y}, {p0.x + size.x, y + track_h - 1}, col)
 	}
 
 	// Grid
@@ -669,6 +770,17 @@ timeline :: proc() {
 			b := im.Vec2{time_to_x(p0.x, part.t1), py + PART_H - 2}
 			im.DrawList_AddRectFilled(dl, a, b, pattern_color(part.pattern))
 			im.DrawList_AddRect(dl, a, b, i == sel_part ? 0xFFFFFFFF : 0xFF000000)
+			if part.pattern >= 0 && int(part.pattern) < len(project.patterns) && b.x > win_pos.x && a.x < win_pos.x + win_size.x { // the pattern's hits, one tick each, colored by lane
+				im.DrawList_PushClipRect(dl, a, b, true)
+				for h in pattern_hits(project, project.patterns[part.pattern], part.t0, part.t1, part_anchor(part)) {
+					x := time_to_x(p0.x, h.time)
+					if x < win_pos.x - 4 || x > win_pos.x + win_size.x {continue}
+					r, g, bl: f32
+					im.ColorConvertHSVtoRGB(math.mod(f32(h.lane) * 0.13 + 0.05, 1), 0.5, 1, &r, &g, &bl)
+					im.DrawList_AddRectFilled(dl, {x, a.y + 12}, {x + 2, b.y - 1}, im.ColorConvertFloat4ToU32({r, g, bl, 1}))
+				}
+				im.DrawList_PopClipRect(dl)
+			}
 			name := part.pattern >= 0 && int(part.pattern) < len(project.patterns) ? get_fixed(project.patterns[part.pattern].name[:]) : "no pattern"
 			im.DrawList_PushClipRect(dl, a, b, true)
 			im.DrawList_AddText(dl, {a.x + 4, a.y}, 0xFFFFFFFF, cstr(name))
@@ -728,7 +840,7 @@ timeline :: proc() {
 	for c in project.clips {
 		y := track_to_y(p0.y, c.track)
 		a := im.Vec2{time_to_x(p0.x, c.start), y + 2}
-		b := im.Vec2{time_to_x(p0.x, clip_end(c)), y + TRACK_H - 3}
+		b := im.Vec2{time_to_x(p0.x, clip_end(c)), y + track_h - 3}
 		if b.x < win_pos.x || a.x > win_pos.x + win_size.x {continue} // off screen
 		im.DrawList_AddRectFilled(dl, a, b, clip_color(c))
 		im.DrawList_AddRect(dl, a, b, c.selected ? 0xFFFFFFFF : (c.locked ? 0xFF30D0FF : 0xFF000000), 0, c.locked ? 2 : 1)
@@ -769,7 +881,7 @@ timeline :: proc() {
 	for track in 0 ..< project.track_count {
 		if track_has(project, track, .Locked) {
 			y := track_to_y(p0.y, track)
-			im.DrawList_AddRectFilled(dl, {p0.x, y}, {p0.x + size.x, y + TRACK_H - 1}, 0x70000000)
+			im.DrawList_AddRectFilled(dl, {p0.x, y}, {p0.x + size.x, y + track_h - 1}, 0x70000000)
 		}
 	}
 
@@ -783,8 +895,32 @@ timeline :: proc() {
 		im.DrawList_AddLine(dl, {rx, p0.y + LANES_Y}, {rx, p0.y + size.y}, 0xFF40A0FF, 1)
 	}
 
+	// Ruler: ticks every second, m:ss labels spaced so they never touch. It stays at the top while the lanes scroll.
+	ry := p0.y + sy
+	im.DrawList_AddRectFilled(dl, p0, {p0.x + size.x, ry + RULER_H}, 0xFF303030)
+	cx := time_to_x(p0.x, checkpoint) // checkpoint marker: where a double-tapped play returns to
+	im.DrawList_AddTriangleFilled(dl, {cx - 5, ry}, {cx + 5, ry}, {cx, ry + 9}, 0xFF40C0FF)
+	label_step := 1
+	for s in ([?]int{1, 2, 5, 10, 15, 30, 60, 120, 300, 600}) {
+		label_step = s
+		if f32(s) * zoom >= 64 {break}
+	}
+	for s in 0 ..< int(length) {
+		x := time_to_x(p0.x, f64(s))
+		big := s % label_step == 0
+		im.DrawList_AddLine(dl, {x, ry + RULER_H - (big ? 9 : 5)}, {x, ry + RULER_H}, 0xFF909090)
+		if big {
+			im.DrawList_AddText(dl, {x + 3, ry + 2}, 0xFFC0C0C0, cstr(fmt.tprintf("%d:%02d", s / 60, s % 60)))
+		}
+	}
+
+	px_top := time_to_x(p0.x, playhead)
+	im.DrawList_AddLine(dl, {px_top, ry}, {px_top, ry + RULER_H}, 0xFF3030FF, 2)
+	im.DrawList_AddTriangleFilled(dl, {px_top - 6, ry}, {px_top + 6, ry}, {px_top, ry + 10}, 0xFF3030FF)
+
 	draw_track_headers(dl, p0, sx, size.y, rows, vl)
 	context_menu() // opened by the right-clicks above, so it must live in this window
+	part_edit_popup()
 }
 
 // ---------------------------------------------------------------- track headers
@@ -795,7 +931,9 @@ draw_track_headers :: proc(dl: ^im.DrawList, p0: im.Vec2, sx, height: f32, rows:
 	hl := p0.x - HEADER_W + sx
 	hr := hl + HEADER_W
 	im.DrawList_AddRectFilled(dl, {hl, p0.y}, {hr, p0.y + height}, 0xFF1B1B1B)
-	im.DrawList_AddText(dl, {hl + 8, p0.y + 3}, 0xFFFFFFFF, cstr(fmt.tprintf("%d fps", project.settings.fps)))
+	sy := im.GetScrollY()
+	im.DrawList_AddRectFilled(dl, {hl, p0.y + sy}, {hr, p0.y + sy + RULER_H}, 0xFF303030)
+	im.DrawList_AddText(dl, {hl + 8, p0.y + sy + 3}, 0xFFFFFFFF, cstr(fmt.tprintf("%d fps", project.settings.fps)))
 	im.DrawList_AddText(dl, {hl + 8, p0.y + RULER_H + 1}, 0xFFB0B0B0, "Parts")
 	im.DrawList_AddText(dl, {hl + 8, p0.y + PROG_Y + 5}, 0xFFFFFFFF, "Program")
 	im.DrawList_AddText(dl, {hl + 8, p0.y + LYR_Y + 1}, 0xFFB0B0B0, "Lyrics")
@@ -803,19 +941,19 @@ draw_track_headers :: proc(dl: ^im.DrawList, p0: im.Vec2, sx, height: f32, rows:
 	mouse := im.GetMousePos()
 	click := im.IsWindowHovered() && im.IsMouseClicked(.Left)
 	for r in 0 ..< rows {
-		y := p0.y + LANES_Y + f32(r) * TRACK_H
+		y := p0.y + LANES_Y + f32(r) * track_h
 		track := project.track_count - 1 - r
 		real := track >= 0
 		col: u32 = r % 2 == 0 ? 0xFF222222 : 0xFF292929
 		if real && track_has(project, track, .Selected) {
 			col = 0xFF4A3A20
 		}
-		im.DrawList_AddRectFilled(dl, {hl, y}, {hr, y + TRACK_H - 1}, col)
+		im.DrawList_AddRectFilled(dl, {hl, y}, {hr, y + track_h - 1}, col)
 		if !real {continue}
 
 		im.DrawList_AddText(dl, {hl + 8, y + 12}, 0xFFE0E0E0, cstr(lane_label(vl, track)))
 		has_video, has_audio := lane_kinds(track)
-		bx, by := hl + 42, y + (TRACK_H - 20) / 2
+		bx, by := hl + 42, y + (track_h - 20) / 2
 		toggled := false
 		toggle :: proc(track: int, flag: Track_Flag) {
 			flags := &project.track_flags[track]
@@ -861,11 +999,11 @@ draw_track_headers :: proc(dl: ^im.DrawList, p0: im.Vec2, sx, height: f32, rows:
 			toggled = true
 		}
 		// clicking elsewhere on the header selects the layer
-		if click && !toggled && mouse.x >= hl && mouse.x < hr && mouse.y >= y && mouse.y < y + TRACK_H {
+		if click && !toggled && mouse.x >= hl && mouse.x < hr && mouse.y >= y && mouse.y < y + track_h {
 			select_track(track, im.GetIO().KeyCtrl, im.GetIO().KeyShift)
 		}
 		// right-click: keep a multi-selection if the layer is in it, then open the layer menu
-		if im.IsWindowHovered() && im.IsMouseClicked(.Right) && mouse.x >= hl && mouse.x < hr && mouse.y >= y && mouse.y < y + TRACK_H {
+		if im.IsWindowHovered() && im.IsMouseClicked(.Right) && mouse.x >= hl && mouse.x < hr && mouse.y >= y && mouse.y < y + track_h {
 			if !track_has(project, track, .Selected) {
 				select_track(track, false, false)
 			}

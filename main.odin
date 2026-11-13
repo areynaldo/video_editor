@@ -83,8 +83,12 @@ do_export :: proc() {
 	ext := FORMAT_EXT[project.settings.format]
 	path, ok := pick_file(true, "Export", fmt.tprintf("%s|*.%s|All files|*.*", ext, ext), fmt.tprintf("%s.%s", settings_name(&project.settings), ext), strings.concatenate({".", ext}, context.temp_allocator))
 	if !ok {return}
-	set_status("exporting %s ...", path)
-	set_status(export(project, path) ? "exported %s" : "export failed (see console): %s", path)
+	d := new(Export_Job)
+	d.p, d.path = project, strings.clone(path)
+	if !job_start("Exporting the video", export_work, export_finish, d) {
+		delete(d.path)
+		free(d)
+	}
 }
 do_action :: proc(a: Action) {
 	switch a {
@@ -103,7 +107,7 @@ do_action :: proc(a: Action) {
 	case .Redo:
 		if drag == .None {redo()}
 	case .Duplicate:
-		if any_selected() {duplicate_selected(&project)} else {duplicate_selected_tracks(&project)}
+		if sel_part >= 0 && sel_part < len(project.parts) {duplicate_part(sel_part)} else if any_selected() {duplicate_selected(&project)} else {duplicate_selected_tracks(&project)}
 	case .Delete: // a part, a program cut, else clips, else layers
 		switch {
 		case lyrics_selected() > 0: // the selected lyric lines
@@ -140,7 +144,7 @@ do_action :: proc(a: Action) {
 	case .Link:   link_selected(&project)
 	case .Unlink: unlink_selected(&project)
 
-	case .Split:        split_at(&project, playhead)
+	case .Split:        if !(sel_part >= 0 && split_part(sel_part, playhead)) {split_at(&project, playhead)}
 	case .Add_Layer:    add_track(&project)
 	case .Remove_Layer: remove_selected_tracks(&project)
 	case .Play:

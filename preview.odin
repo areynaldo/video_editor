@@ -14,8 +14,8 @@ import stbi "vendor:stb/image"
 // everything already decoded (decoding runs far faster than realtime).
 // Frames keep the source's aspect ratio; the preview panel does the fitting.
 
-PROXY_MAX_W :: 640
-PROXY_MAX_H :: 360
+PROXY_MAX_W :: 960 // the preview works from these frames: 640x360 looked blocky
+PROXY_MAX_H :: 540
 
 Proxy :: struct {
 	mu:      sync.Mutex,
@@ -74,7 +74,7 @@ proxy_start :: proc(path: string, fps: int) {
 		command = {
 			"ffmpeg", "-v", "error", "-i", path, "-an",
 			"-vf", fmt.tprintf("fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease:force_divisible_by=2", fps, PROXY_MAX_W, PROXY_MAX_H),
-			"-pix_fmt", "yuvj420p", "-c:v", "mjpeg", "-q:v", "4", "-f", "image2pipe", "pipe:1",
+			"-pix_fmt", "yuvj420p", "-c:v", "mjpeg", "-q:v", "3", "-f", "image2pipe", "pipe:1",
 		},
 		stdout = w,
 	}

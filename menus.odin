@@ -220,6 +220,9 @@ panel_randomize :: proc() {
 		im.Checkbox("use all clips", &o.use_all)
 		im.SameLine()
 		im.TextDisabled("the rhythm loops until every piece is used")
+		im.Checkbox("spread clips evenly", &o.spread)
+		im.SameLine()
+		im.TextDisabled("every clip over the whole video, not the short ones used up first")
 	}
 	im.SetNextItemWidth(90)
 	im.InputInt("max in a row (0 = any)", &o.max_run)
@@ -350,12 +353,8 @@ context_menu :: proc() {
 			}
 			if im.MenuItem("No pattern") {project.parts[sel_part].pattern = -1}
 			im.Separator()
-			if im.MenuItem("Apply this part") {
-				part := project.parts[sel_part]
-				if part.pattern >= 0 && int(part.pattern) < len(project.patterns) {
-					program_apply_pattern(&project, project.patterns[part.pattern], part.t0, part.t1, true)
-				}
-			}
+			if im.MenuItem("Duplicate") {duplicate_part(sel_part)}
+			if im.MenuItem("Split here") {_ = split_part(sel_part, snap(ctx_time))}
 			if im.MenuItem("Remove part") {
 				ordered_remove(&project.parts, sel_part)
 				sel_part = -1

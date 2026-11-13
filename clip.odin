@@ -63,11 +63,31 @@ FORMAT_EXT := [Export_Format]string {
 	.MOV  = "mov",
 }
 
+// How hard the export is compressed. Typical = what most editors call "high"; Max is near lossless (big files).
+Export_Quality :: enum i32 {
+	Typical,
+	High,
+	Max,
+}
+
+// The part of the picture the clips are shown in: the whole picture, or the centered area of the mask's ratio
+// (fake vertical borders: a 9:16 mask in a 16:9 project). x, y, w, h in picture pixels, even.
+mask_rect :: proc(s: Settings) -> (x, y, w, h: int) {
+	W, H := int(s.width) &~ 1, int(s.height) &~ 1
+	if s.mask_w <= 0 || s.mask_h <= 0 {return 0, 0, W, H}
+	aspect := f64(s.mask_w) / f64(s.mask_h)
+	w, h = W, int(f64(W) / aspect)
+	if h > H {w, h = int(f64(H) * aspect), H}
+	w, h = max(w &~ 1, 2), max(h &~ 1, 2)
+	return ((W - w) / 2) &~ 1, ((H - h) / 2) &~ 1, w, h
+}
+
 Settings :: struct {
 	name:          [64]u8, // project name, also the default export file name
 	fps:           i32,
 	width, height: i32, // export canvas
 	format:        Export_Format,
+	quality:       Export_Quality,
 	// timeline grid: lines + snapping while dragging / scrubbing
 	grid_on:       bool,
 	grid_type:     Grid_Type,
@@ -78,6 +98,8 @@ Settings :: struct {
 	grid_offset:   f64, // seconds: where the grid starts (the first beat of the music)
 	rand:          Rand_Options, // the Randomize command
 	bg:            [3]f32, // background colour of the picture (r, g, b: 0..1)
+	mask_w, mask_h: i32, // mask: the clips are shown in a centered area of this ratio (9:16 ...), bars around it. 0 = no mask
+	mask_color:    [3]f32, // the bars
 	pattern_sel:   i32, // current cutting pattern
 	bpm_lo:        f32, // tempo detection only looks for tempos in this range
 	bpm_hi:        f32,
@@ -201,9 +223,10 @@ project_reset :: proc(p: ^Project) {
 		bpm_hi = 180,
 		lyric_size = 6,
 		lyric_burn = true,
+		quality = .High,
 		lyric_color = {1, 1, 1},
 		lyric_border_w = 7,
-		rand = {footage = .Same_Time, slice = .Cuts, pattern = -1, max_run = 1},
+		rand = {footage = .Same_Time, slice = .Cuts, pattern = -1, max_run = 1, spread = true},
 	}
 	set_name(&p.settings, "untitled")
 	set_fixed(p.settings.lyric_font[:], "arial.ttf")
@@ -563,6 +586,7 @@ Rand_Options :: struct {
 	footage: Rand_Footage,
 	slice:   Rand_Slice,
 	pattern: i32,  // for slice = Pattern without parts: index of the pattern, -1 = the current one
+	spread:  bool, // in order / any piece: clips are picked by how much footage they have left, so every clip is spread over the whole length (not the short ones used up at the start)
 	use_all: bool, // go on (the rhythm loops) until every piece of footage is used; In_Order and Any_Piece only
 	max_run: i32,  // most consecutive slots filled from the same clip; 0 = no limit
 }
@@ -571,7 +595,10 @@ Rand_Options :: struct {
 Part :: struct {
 	t0, t1:  f64,
 	pattern: i32, // index into Project.patterns, -1 = none
+	anchor:  f64, // where step 0 of the pattern sits (< 0 = at t0). Cutting the start of a part keeps the hits where they were; moving a part carries them
 }
+
+part_anchor :: proc(part: Part) -> f64 {return part.anchor >= 0 ? part.anchor : part.t0}
 
 any_selected :: proc() -> bool {
 	for c in project.clips {

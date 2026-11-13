@@ -72,6 +72,7 @@ frame :: proc() {
 	job_ui()
 	report_ui()
 
+	parts_sync() // painted parts make their cuts (before the undo step is recorded)
 	history_commit(drag != .None || im.IsAnyItemActive())
 }
 
@@ -126,6 +127,7 @@ panel_preview :: proc() {
 
 	dl := im.GetWindowDrawList()
 	defer draw_lyric_preview(dl, a, b) // over the picture, also when there is none
+	defer draw_mask_bars(dl, a, cw / f32(s.width)) // over the picture, under the lyrics
 	im.DrawList_AddRectFilled(dl, a, b, im.ColorConvertFloat4ToU32({s.bg.r, s.bg.g, s.bg.b, 1})) // the background colour
 	ci := video_clip_at(project, playhead)
 	if ci < 0 {
@@ -137,11 +139,13 @@ panel_preview :: proc() {
 		return
 	}
 	// fit the frame into the canvas, then apply the clip transform (same math as export)
-	kx := min(cw / f32(pv_w), ch / f32(pv_h))
+	_, _, mkw, mkh := mask_rect(s)
+	mcw, mch := f32(mkw) * cw / f32(max(s.width &~ 1, 2)), f32(mkh) * ch / f32(max(s.height &~ 1, 2)) // the area the clips are shown in
+	kx := min(mcw / f32(pv_w), mch / f32(pv_h))
 	ky := kx
 	#partial switch c.fit {
-	case .Fill:    kx = max(cw / f32(pv_w), ch / f32(pv_h)); ky = kx
-	case .Stretch: kx, ky = cw / f32(pv_w), ch / f32(pv_h)
+	case .Fill:    kx = max(mcw / f32(pv_w), mch / f32(pv_h)); ky = kx
+	case .Stretch: kx, ky = mcw / f32(pv_w), mch / f32(pv_h)
 	}
 	hw, hh := f32(pv_w) * kx * c.scale / 2, f32(pv_h) * ky * c.scale / 2
 	px := cw / f32(s.width) // canvas pixels -> screen pixels
@@ -160,6 +164,22 @@ panel_preview :: proc() {
 		corner(center, -hw, hh, sin_r, cos_r),
 		)
 	im.DrawList_PopClipRect(dl)
+}
+
+// The bars of the mask over the picture (a = the picture's top left, px = screen pixels per picture pixel).
+draw_mask_bars :: proc(dl: ^im.DrawList, a: im.Vec2, px: f32) {
+	s := project.settings
+	mx, my, mw, mh := mask_rect(s)
+	W, H := int(s.width) &~ 1, int(s.height) &~ 1
+	if mw >= W && mh >= H {return}
+	col := im.ColorConvertFloat4ToU32({s.mask_color.r, s.mask_color.g, s.mask_color.b, 1})
+	bar :: proc(dl: ^im.DrawList, a: im.Vec2, px: f32, x, y, w, h: int, col: u32) {
+		if w > 0 && h > 0 {im.DrawList_AddRectFilled(dl, {a.x + f32(x) * px, a.y + f32(y) * px}, {a.x + f32(x + w) * px, a.y + f32(y + h) * px}, col)}
+	}
+	bar(dl, a, px, 0, 0, mx, H, col)
+	bar(dl, a, px, mx + mw, 0, W - mx - mw, H, col)
+	bar(dl, a, px, 0, 0, W, my, col)
+	bar(dl, a, px, 0, my + mh, W, H - my - mh, col)
 }
 
 // ---------------------------------------------------------------- inspector / project
@@ -227,6 +247,39 @@ size_presets :: proc(s: ^Settings) {
 	tip("Swap width and height (horizontal <-> vertical)")
 }
 
+MASK_PRESETS := [?]struct {
+	name: cstring,
+	w, h: i32,
+} {
+	{"none", 0, 0},
+	{"vertical 9:16", 9, 16},
+	{"portrait 4:5", 4, 5},
+	{"portrait 3:4", 3, 4},
+	{"square 1:1", 1, 1},
+	{"classic 4:3", 4, 3},
+	{"cinema 2.39:1", 239, 100},
+	{"wide 16:9", 16, 9},
+}
+
+// The mask: show the clips in a centered area of another ratio, with bars around it.
+mask_ui :: proc(s: ^Settings) {
+	current: cstring = "custom"
+	for m in MASK_PRESETS {
+		if m.w == s.mask_w && m.h == s.mask_h {current = m.name}
+	}
+	im.SetNextItemWidth(-90)
+	if im.BeginCombo("mask", current) {
+		for m in MASK_PRESETS {
+			if im.Selectable(m.name, m.w == s.mask_w && m.h == s.mask_h) {s.mask_w, s.mask_h = m.w, m.h}
+		}
+		im.EndCombo()
+	}
+	tip("Fake borders: the clips are shown only in a centered area of this ratio (a vertical video inside a horizontal project). The rest is a bar.")
+	if s.mask_w > 0 {
+		im.ColorEdit3("bars", &s.mask_color, {.NoInputs})
+	}
+}
+
 bg_popup_open: bool // set by the Background color command: the Program panel opens the picker
 
 // The color picker over the Program picture.
@@ -274,7 +327,11 @@ inspector_slices :: proc() {
 	if im.IsItemHovered() {
 		im.SetTooltip("same time: what plays at that time (cuts between clips)\nin order: each clip plays forward, a piece at a time\nany piece: a random piece\n\nThis also decides what the wheel and Reroll give a slice.")
 	}
-	if o.footage != .Same_Time {im.Checkbox("use all clips", &o.use_all)}
+	if o.footage != .Same_Time {
+		im.Checkbox("use all clips", &o.use_all)
+		im.Checkbox("spread clips evenly", &o.spread)
+		tip("Every clip appears at the same rate over the whole video. Off: clips take equal turns, so short clips are used up at the start.")
+	}
 	im.SetNextItemWidth(-90)
 	im.InputInt("max in a row", &o.max_run)
 	o.max_run = max(o.max_run, 0)
@@ -308,6 +365,7 @@ panel_inspector :: proc() {
 		inspector_slices()
 		im.SeparatorText("Picture")
 		size_presets(&project.settings)
+		mask_ui(&project.settings)
 		im.ColorEdit3("background", &project.settings.bg)
 		im.TextDisabled("or double-click the picture")
 	}
@@ -478,6 +536,7 @@ panel_project :: proc() {
 		im.ColorEdit3("background", &s.bg, {.NoInputs})
 		im.DragInt("frame rate", &s.fps, 0.2, 1, 120)
 		size_presets(s)
+		mask_ui(s)
 		im.InputInt("width", &s.width, 2, 100)
 		im.InputInt("height", &s.height, 2, 100)
 		s.fps = clamp(s.fps, 1, 120)
@@ -486,6 +545,10 @@ panel_project :: proc() {
 		fmt_i := i32(s.format)
 		if im.Combo("format", &fmt_i, "mp4\x00mkv\x00webm\x00mov\x00\x00") {
 			s.format = Export_Format(fmt_i)
+		}
+		quality_i := i32(s.quality)
+		if im.Combo("quality", &quality_i, "typical (smaller)\x00high\x00max (huge files)\x00\x00") {
+			s.quality = Export_Quality(quality_i)
 		}
 		im.TextDisabled(cstr(project_path == "" ? "(unsaved project)" : project_path))
 	}

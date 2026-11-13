@@ -15,7 +15,7 @@ A small video editor for personal music videos. It cuts video clips to the beat 
 - Show one video layer at a time. The program row shows which layer is visible.
 - Select a range in the program row. Copy it, paste it, repeat it, or loop it.
 - Randomize. It fills each slice of the rhythm with footage from your clips, on a new layer. The footage is the same time, in order, or any piece.
-- Lock clips and slices (`k`). A locked clip does not change. Randomize again: locked slices stay, the other slices change. Roll the mouse wheel on a slice to switch its footage.
+- Lock clips and slices (`k`). A locked clip does not change. Randomize again: locked slices stay, the other slices change. Roll the mouse wheel on a slice to reroll its footage (all selected slices if the pointer is over a selected one). The wheel does not lock.
 - Add lyrics. Type the text, one line each, with times. Edit the lines in the Lyrics row of the timeline. Press **Auto-align** to time the lines from the song (needs whisper.cpp), or tap the start of each line while the song plays. The lines show in the preview and in the export. Pick what is shown (one word, a sentence, or a verse that builds up), the font, the text color, and the border color. Open and save SRT, LRC, ASS, and TXT.
 - Make smooth slow motion. Select clips. Press **Smooth slow-mo**. A window sets the speed in percent or the new length (the two follow each other), then renders. You can also slow a clip by hand (`shift` + drag its edge). Commands act on all selected clips. It renders the new frames one time and keeps the file in the `cache` folder.
 - Enhance clips. **Enhance + upscale** renders a clip at twice the size, cleaner, sharper, with fixed levels.
@@ -24,7 +24,7 @@ A small video editor for personal music videos. It cuts video clips to the beat 
 - Set the background color: double-click the Program picture, use **Edit > Background color...** (or `F1`), or use the Inspector. Set the transform of one slice or of all slices of a clip.
 - Edit on many layers. Lock, hide, mute, or solo a layer.
 - Play with sound. See the waveform and the level meters.
-- Export with ffmpeg to mp4, mkv, webm, or mov.
+- Export with ffmpeg to mp4, mkv, webm, or mov. **Quality** (Project settings): typical (x264 crf 19), high (crf 16, slow preset, the default), max (crf 12, near lossless, big files). Audio is aac 192k to 320k (webm: VP9 and Opus). The export reads the original files at full size. Only the preview works from small frames (960x540).
 - Use undo and redo. Press **F1** to search all commands.
 
 ## Ideal workflow
@@ -36,14 +36,14 @@ A small video editor for personal music videos. It cuts video clips to the beat 
 5. If the grid is not on the beat, move the playhead to a beat. Press **Beat at playhead** (`shift+h`).
 6. Open **Patterns** (`shift+p`). Press **New**. Click the steps to make hits.
 7. Set each lane to a layer (V1, V2, ...) or to `mark`. A `mark` only makes a cut.
-8. Press **Apply pattern** (`p`). To use other patterns in other places, pick a pattern in the **brush** strip of the Timeline. Drag in the **Parts** row to paint it. `ctrl`+click a part to repaint it. Right-click a part for more.
+8. Parts apply their pattern by themselves: the cuts appear while you paint, move, resize, duplicate (`ctrl`+`d`) or split (`s`) a part, or edit the pattern (no apply step; cuts inside a changed part belong to its pattern, and its hits are drawn in the part). **Apply pattern** (`p`) is for the whole project or a selected range without parts. To use other patterns in other places, pick a pattern in the **brush** strip of the Timeline. Parts work like clips in the **Parts** row: drag on empty space to paint one (`shift`+drag paints over other parts and cuts them back), drag a part to move it, drag its edges to resize it (it stops at its neighbours). **Double-click** a part to edit its pattern, start, end and length in numbers. **Double-click** free space to fill the gap with the brush. Clicking a brush chip while a part is selected repaints that part; `ctrl`+click also repaints. Right-click a part for more.
 9. Select a range in the program row. Press `ctrl+c` to copy, `ctrl+v` to paste, or `ctrl+r` to repeat it. Press `ctrl+l` to loop the playback.
 10. Open **Randomize options** (`shift+r`). Set the options. Press **Randomize** (`r`).
     - It slices at the cuts, the pattern, or the grid. It fills each slice with footage on a new layer.
     - A lane with a layer keeps its layer.
-    - The **Randomize** section of the Inspector shows and sets how the footage is chosen (slice at, footage, use all clips, max in a row).
+    - The **Randomize** section of the Inspector shows and sets how the footage is chosen (slice at, footage, use all clips, **spread clips evenly**, max in a row). Spread (on by default) picks clips by how much footage they have left, so every clip shows up at the same rate over the whole video. Without it clips take equal turns and the short ones are used up at the start.
     - Select slices you like. Press **Lock** (`k`) or the Inspector button. **Reroll** gives selected slices new random footage. Press `r` again: locked slices stay, the others change.
-    - Roll the mouse wheel on a slice to switch its footage. The footage mode decides which footage comes next. The slice is locked after that.
+    - Roll the mouse wheel on a slice to reroll it. The footage mode decides where the new footage comes from. The slice is not locked: press `k` to keep it.
 11. For lyrics, press **Lyrics** (`shift+y`). Paste the text. Press `space` to play the song. Or press **Auto-align**. Or press **Tap** (`y`) at the start of each line. Drag lines in the Lyrics row to correct them: click or ctrl+click to select, drag a box to select many, drag one to move them all. The **move** buttons in the Lyrics window shift all lines or the selected ones. Use **Lyrics > Export lyrics** to save a subtitle file.
 12. Press `space` to play. Press `ctrl+z` to undo a change.
 13. Press **Export** (`ctrl+e`).

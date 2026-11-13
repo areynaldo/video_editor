@@ -68,12 +68,13 @@ atempo_chain :: proc(speed: f64) -> string {
 // scaled / rotated / offset by its transform and overlaid in track order.
 // Audio: every audio clip delayed to its start and mixed. One -i per clip.
 // The container comes from out_path's extension.
-export :: proc(p: Project, out_path: string) -> bool {
+export :: proc(p: Project, out_path: string) -> (ok: bool, err: string) {
 	length := project_length(p)
 	if length <= 0 {
-		return false
+		return false, "nothing to export"
 	}
 	W, H, FPS := int(p.settings.width) &~ 1, int(p.settings.height) &~ 1, int(p.settings.fps)
+	mx, my, MW, MH := mask_rect(p.settings)
 
 	// Clip indices sorted by track so higher tracks are overlaid last.
 	order := make([dynamic]int, context.temp_allocator)
@@ -89,7 +90,9 @@ export :: proc(p: Project, out_path: string) -> bool {
 	args := make([dynamic]string, context.temp_allocator)
 	append(&args, "ffmpeg", "-y")
 	for c in p.clips {
-		append(&args, "-i", p.sources[c.source].path)
+		// -ss / -t before -i: ffmpeg jumps to the piece instead of decoding the file from its start for every
+		// clip (with hundreds of slices of one long video that was the whole export time)
+		append(&args, "-ss", fmt.tprintf("%.3f", c.in_point), "-t", fmt.tprintf("%.3f", c.duration * c.speed), "-i", p.sources[c.source].path)
 	}
 
 	g: strings.Builder
@@ -121,9 +124,9 @@ export :: proc(p: Project, out_path: string) -> bool {
 			vcount += 1
 			fmt.sbprintf(
 				&g,
-				"[%d:v]trim=start=%.3f:duration=%.3f,setpts=(PTS-STARTPTS)/%.6f+%.3f/TB,fps=%d," +
+				"[%d:v]setpts=(PTS-STARTPTS)/%.6f+%.3f/TB,fps=%d," +
 					"scale=%d:%d%s,scale=iw*%.4f:ih*%.4f,setsar=1,format=rgba,",
-					ci, c.in_point, c.duration * c.speed, c.speed, c.start, FPS, W, H, fit_filter[c.fit], c.scale, c.scale,
+					ci, c.speed, c.start, FPS, MW, MH, fit_filter[c.fit], c.scale, c.scale,
 				)
 			if c.rotation != 0 {
 				fmt.sbprintf(&g, "rotate=a=%.6f:ow='hypot(iw,ih)':oh='hypot(iw,ih)':c=none,", f64(c.rotation) * math.PI / 180)
@@ -141,13 +144,27 @@ export :: proc(p: Project, out_path: string) -> bool {
 			ms := int(c.start * 1000)
 			fmt.sbprintf(
 				&g,
-				"[%d:a]atrim=start=%.3f:duration=%.3f,asetpts=PTS-STARTPTS,%s%sadelay=%d|%d[a%d];",
-				ci, c.in_point, c.duration * c.speed, atempo_chain(c.speed), gain_filter(c.gain_db), ms, ms, acount,
+				"[%d:a]asetpts=PTS-STARTPTS,%s%sadelay=%d|%d[a%d];",
+				ci, atempo_chain(c.speed), gain_filter(c.gain_db), ms, ms, acount,
 				)
 		}
 	}
 	// lyrics: one drawtext for each line, burned into the finished picture
 	final := fmt.tprintf("[v%d]", vcount)
+	if MW < W || MH < H { // the bars of the mask, over whatever spills out of the area
+		bc := p.settings.mask_color
+		col := fmt.tprintf("0x%02x%02x%02x", int(bc.r * 255 + 0.5), int(bc.g * 255 + 0.5), int(bc.b * 255 + 0.5))
+		box :: proc(g: ^strings.Builder, x, y, w, h: int, col: string, first: bool) {
+			if w > 0 && h > 0 {fmt.sbprintf(g, "%sdrawbox=x=%d:y=%d:w=%d:h=%d:color=%s:t=fill", first ? "" : ",", x, y, w, h, col)}
+		}
+		fmt.sbprintf(&g, "%s", final)
+		box(&g, 0, 0, mx, H, col, true)
+		box(&g, mx + MW, 0, W - mx - MW, H, col, false)
+		box(&g, 0, 0, W, my, col, false)
+		box(&g, 0, my + MH, W, H - my - MH, col, false)
+		strings.write_string(&g, "[vmask];")
+		final = "[vmask]"
+	}
 	lyric_files := make([dynamic]string, context.temp_allocator)
 	defer for f in lyric_files {os.remove(f)}
 	if s := p.settings; s.lyric_burn && len(p.lyrics) > 0 {
@@ -155,7 +172,7 @@ export :: proc(p: Project, out_path: string) -> bool {
 			size := max(int(f64(H) * f64(s.lyric_size) / 100), 8)
 			lh := int(f64(size) * LYRIC_LINE_H)
 			border := int(f64(size) * f64(s.lyric_border_w) / 100)
-			fmt.sbprintf(&g, "[v%d]", vcount)
+			strings.write_string(&g, final)
 			shows := make([dynamic]Show, context.temp_allocator)
 			build_shows(p, &shows)
 			for show, i in shows {
@@ -196,14 +213,62 @@ export :: proc(p: Project, out_path: string) -> bool {
 	if acount > 0 {
 		append(&args, "-map", "[aout]")
 	}
-	append(&args, "-t", fmt.tprintf("%.3f", length), "-pix_fmt", "yuv420p", out_path)
+	append(&args, "-t", fmt.tprintf("%.3f", length), "-pix_fmt", "yuv420p")
+	append(&args, ..quality_args(p.settings.format, p.settings.quality))
+	append(&args, out_path)
 
-	state, _, errout, err := os.process_exec({command = args[:]}, context.temp_allocator)
-	if err != nil || !exited_ok(state) {
-		fmt.eprintln(string(errout))
-		return false
+	// runs as a background job: the bar follows ffmpeg's own progress report
+	if msg := ffmpeg_tracked(args[2:], length, 0, 1); msg != "" {
+		os.remove(out_path) // a half written file is no export
+		return false, msg
 	}
-	return true
+	return true, ""
+}
+
+Export_Job :: struct {
+	p:    Project, // a shallow copy: the loading window keeps the project from being edited while it runs
+	path: string, // heap
+	err:  string, // heap; "" = fine
+}
+
+export_work :: proc(data: rawptr) {
+	d := (^Export_Job)(data)
+	job_step("encoding the video ...")
+	_, err := export(d.p, d.path)
+	d.err = strings.clone(err)
+}
+
+export_finish :: proc(data: rawptr) {
+	d := (^Export_Job)(data)
+	defer {
+		delete(d.path)
+		delete(d.err)
+		free(d)
+	}
+	switch d.err {
+	case "":        set_status("exported %s", d.path)
+	case "stopped": set_status("export stopped")
+	case:
+		set_status("export failed: %s", d.path)
+		job_report("The export did not finish", d.err)
+	}
+}
+
+// Codec settings for the export. Without them ffmpeg uses its defaults (x264 crf 23, aac 128k), which
+// is what makes an export look compressed. x264: constant quality (crf: lower = better), slow preset.
+// WebM cannot hold x264: VP9 + Opus.
+quality_args :: proc(format: Export_Format, q: Export_Quality) -> []string {
+	crf := [Export_Quality]string{.Typical = "19", .High = "16", .Max = "12"}
+	vp9 := [Export_Quality]string{.Typical = "32", .High = "24", .Max = "17"}
+	audio := [Export_Quality]string{.Typical = "192k", .High = "256k", .Max = "320k"}
+	out := make([dynamic]string, context.temp_allocator)
+	if format == .WebM {
+		append(&out, "-c:v", "libvpx-vp9", "-crf", vp9[q], "-b:v", "0", "-row-mt", "1", "-c:a", "libopus", "-b:a", audio[q])
+		return out[:]
+	}
+	append(&out, "-c:v", "libx264", "-crf", crf[q], "-preset", q == .Typical ? "medium" : "slow", "-c:a", "aac", "-b:a", audio[q])
+	if format == .MP4 || format == .MOV {append(&out, "-movflags", "+faststart")}
+	return out[:]
 }
 
 // ffmpeg volume filter for a dB gain with a trailing comma ("" when unchanged).

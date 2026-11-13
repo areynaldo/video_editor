@@ -14,9 +14,9 @@ save_project :: proc(p: Project, path: string) -> bool {
 	b: strings.Builder
 	strings.builder_init(&b, context.temp_allocator)
 	s := p.settings
-	fmt.sbprintf(&b, "[project]\nname = %s\nfps = %d\nwidth = %d\nheight = %d\nformat = %s\n", settings_name(&p.settings), s.fps, s.width, s.height, FORMAT_EXT[s.format])
+	fmt.sbprintf(&b, "[project]\nname = %s\nfps = %d\nwidth = %d\nheight = %d\nformat = %s\nquality = %d\n", settings_name(&p.settings), s.fps, s.width, s.height, FORMAT_EXT[s.format], int(s.quality))
 	fmt.sbprintf(&b, "grid = %d\ngrid_type = %d\nbpm = %.3f\ngrid_div = %d\n", s.grid_on ? 1 : 0, int(s.grid_type), s.bpm, s.grid_div)
-	fmt.sbprintf(&b, "cut_every = %d\nmaster = %.2f\ngrid_offset = %.4f\nrand_footage = %d\nrand_use_all = %d\nrand_slice = %d\nrand_pattern = %d\nrand_max_run = %d\nbg = %02x%02x%02x\n", s.cut_every, s.master_db, s.grid_offset, int(s.rand.footage), s.rand.use_all ? 1 : 0, int(s.rand.slice), s.rand.pattern, s.rand.max_run, int(s.bg.r * 255 + 0.5), int(s.bg.g * 255 + 0.5), int(s.bg.b * 255 + 0.5))
+	fmt.sbprintf(&b, "cut_every = %d\nmaster = %.2f\ngrid_offset = %.4f\nrand_footage = %d\nrand_use_all = %d\nrand_spread = %d\nrand_slice = %d\nrand_pattern = %d\nrand_max_run = %d\nbg = %02x%02x%02x\nmask_w = %d\nmask_h = %d\nmask_color = %02x%02x%02x\n", s.cut_every, s.master_db, s.grid_offset, int(s.rand.footage), s.rand.use_all ? 1 : 0, s.rand.spread ? 1 : 0, int(s.rand.slice), s.rand.pattern, s.rand.max_run, int(s.bg.r * 255 + 0.5), int(s.bg.g * 255 + 0.5), int(s.bg.b * 255 + 0.5), s.mask_w, s.mask_h, int(s.mask_color.r * 255 + 0.5), int(s.mask_color.g * 255 + 0.5), int(s.mask_color.b * 255 + 0.5))
 	fmt.sbprintf(&b, "pattern_sel = %d\nbpm_lo = %.0f\nbpm_hi = %.0f\n", s.pattern_sel, s.bpm_lo, s.bpm_hi)
 	for pat in p.patterns {
 		pat := pat
@@ -36,7 +36,7 @@ save_project :: proc(p: Project, path: string) -> bool {
 		fmt.sbprintf(&b, "\n[lyric]\nt0 = %.4f\nt1 = %.4f\ntext = %s\n", l.t0, l.t1, text)
 	}
 	for part in p.parts {
-		fmt.sbprintf(&b, "\n[part]\nt0 = %.6f\nt1 = %.6f\npattern = %d\n", part.t0, part.t1, part.pattern)
+		fmt.sbprintf(&b, "\n[part]\nt0 = %.6f\nt1 = %.6f\npattern = %d\nanchor = %.6f\n", part.t0, part.t1, part.pattern, part_anchor(part))
 	}
 	for cut in p.program {
 		fmt.sbprintf(&b, "\n[cut]\ntime = %.6f\nlayer = %d\nfixed = %d\n", cut.time, cut.layer, cut.fixed ? 1 : 0)
@@ -85,7 +85,7 @@ load_project :: proc(p: ^Project, path: string) -> (err: string) {
 			case "clip":   append(&p.clips, Clip{speed = 1, scale = 1})
 			case "cut":    append(&p.program, Cut{layer = -1})
 			case "pattern": append(&p.patterns, Pattern{length = 16, div = 4})
-			case "part":    append(&p.parts, Part{pattern = -1})
+			case "part":    append(&p.parts, Part{pattern = -1, anchor = -1})
 			case "lyric":   append(&p.lyrics, Lyric{})
 			}
 			continue
@@ -116,13 +116,21 @@ load_project :: proc(p: ^Project, path: string) -> (err: string) {
 			case "pattern_sel":  p.settings.pattern_sel = i32(max(n, 0))
 			case "rand_footage": p.settings.rand.footage = Rand_Footage(clamp(n, 0, 2))
 			case "rand_use_all": p.settings.rand.use_all = n != 0
+			case "rand_spread": p.settings.rand.spread = n != 0
 			case "bg":
 				if v, ok := strconv.parse_int(val, 16); ok {
 					p.settings.bg = {f32((v >> 16) & 255) / 255, f32((v >> 8) & 255) / 255, f32(v & 255) / 255}
 				}
+			case "mask_w": p.settings.mask_w = i32(max(n, 0))
+			case "mask_h": p.settings.mask_h = i32(max(n, 0))
+			case "mask_color":
+				if v, ok := strconv.parse_int(val, 16); ok {
+					p.settings.mask_color = {f32((v >> 16) & 255) / 255, f32((v >> 8) & 255) / 255, f32(v & 255) / 255}
+				}
 			case "rand_slice":   p.settings.rand.slice = Rand_Slice(clamp(n, 0, 2))
 			case "rand_pattern": p.settings.rand.pattern = i32(n)
 			case "rand_max_run": p.settings.rand.max_run = i32(max(n, 0))
+			case "quality": p.settings.quality = Export_Quality(clamp(n, 0, 2))
 			case "format":
 				for ext, fmt_ in FORMAT_EXT {
 					if ext == val {p.settings.format = fmt_}
@@ -194,6 +202,7 @@ load_project :: proc(p: ^Project, path: string) -> (err: string) {
 			switch key {
 			case "t0":      part.t0 = f
 			case "t1":      part.t1 = f
+			case "anchor":  part.anchor = f
 			case "pattern": part.pattern = i32(n)
 			}
 		case "cut":

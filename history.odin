@@ -66,6 +66,7 @@ history_reset :: proc() {
 	clear(&redo_stack)
 	snapshot_free(last_state)
 	last_state = snapshot_of(project)
+	parts_mark_synced()
 }
 
 // Call at the end of every frame. busy = a drag or widget edit is in progress.
@@ -104,6 +105,7 @@ apply_snapshot :: proc(s: Snapshot) {
 	clear_track_selection(&project)
 	clear_cut_sel()
 	project.track_count, project.next_group = s.track_count, s.next_group
+	parts_mark_synced() // the snapshot has its own cuts
 }
 undo :: proc() {
 	if len(undo_stack) == 0 {
