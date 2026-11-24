@@ -10,16 +10,22 @@ A small video editor for music videos. It cuts clips to the beat of a song.
 - Detect the bpm. Pick another candidate or tap the tempo if the result is wrong.
 - Show a beat grid. Cuts and clips snap to it. Hold `alt` to turn snapping off.
 - Make patterns. A pattern is a loop of hits on the grid, like a drum machine. Each hit makes a cut.
+  A lane can also repeat the last slot, freeze a frame, or show a black clip (**no clip**).
+  The pattern window shows the song wave. **kick** fills a lane from the bass hits. Import and export patterns as files.
 - Paint parts. A part is a time range with a pattern. Cuts update when you paint, move, resize, duplicate, or split a part.
 - Show one video layer at a time. The program row shows which layer is visible.
 - Randomize. It fills each slice of the rhythm with your footage on a new layer.
+  It does not put the same source twice in a row. Set the odds of each clip in **Clip odds**.
 - Lock clips and slices (`k`). Locked slices stay when you randomize again.
 - Roll the mouse wheel on a slice to reroll it. The wheel does not lock.
-- Add lyrics. Edit text and times. Align them from the song. Burn them into the export. Import and export SRT, LRC, ASS, and TXT.
+- Add lyrics in layers, for example one layer for each language. Edit text and times. Align them from the song.
+  Burn them into the export. Import and export SRT, LRC, ASS, and TXT.
 - Make smooth slow motion with RIFE. Enhance and upscale with Real-ESRGAN.
-- Set the output size, a mask (fake borders, for example 9:16 in a 16:9 project), and the background color.
+- Set the output size, a mask (for example 9:16 in a 16:9 project), and the background color.
+  The mask area has its own color (black). The background color fills the rest.
 - Run long jobs in the background. A window shows the progress. **Cancel** stops the job.
 - Export to mp4, mkv, webm, or mov. Choose the quality: typical, high (default), or max.
+  Export the full picture, the mask area as a second video, or both.
 - Use undo and redo. Press **F1** to search all commands.
 
 ## Workflow
@@ -29,6 +35,7 @@ A small video editor for music videos. It cuts clips to the beat of a song.
 3. Select the song. Press **Detect bpm** (`t`). Press **Beat at playhead** (`shift+h`) if the grid is off the beat.
 4. Open **Patterns** (`shift+p`). Press **New**. Click steps to make hits.
 5. Set each lane to a layer (V1, V2, ...) or to `mark`. A `mark` only makes a cut.
+   Set the mode of a lane: `normal`, `repeat`, `freeze`, or `no clip`. The modes work with **Randomize**.
 6. Pick a pattern in the **brush** strip. Paint parts in the **Parts** row:
    - Drag on empty space to paint a part. Painting over a part cuts it. The rest stays.
    - Drag the top strip of a part to move it. Drag an edge to cut or extend it. The pattern stays in place.
@@ -41,10 +48,11 @@ A small video editor for music videos. It cuts clips to the beat of a song.
    - **slice at** sets the slices: cuts, pattern, or grid.
    - **footage** sets the source: same time, in order, or any piece.
    - **spread clips evenly** (default) shows every clip at the same rate over the whole video.
-   - **max in a row** limits repeats of one clip.
+   - **max in a row** limits repeats of one source.
+   - **Clip odds** sets how often each clip appears.
 9. Lock the slices you like (`k`). Randomize again. Only the other slices change.
 10. For lyrics, press **Lyrics** (`shift+y`). Paste the text. Press **Auto-align** or **Tap** (`y`).
-11. Press **Export** (`ctrl+e`).
+11. Press **Export** (`ctrl+e`). Choose **normal**, **mask area only**, or both.
 
 ## Timeline
 
@@ -77,10 +85,15 @@ Choose the **quality** in Project settings:
 | Quality | Video | Audio |
 |---|---|---|
 | typical | x264 crf 19 | aac 192k |
-| high (default) | x264 crf 16, slow | aac 256k |
+| high (default) | x264 crf 16, medium | aac 256k |
 | max | x264 crf 12, slow (big files) | aac 320k |
 
 WebM uses VP9 and Opus. The export reads the original files at full size. The preview uses small frames (960x540).
+
+- **mask area only** makes a second video of the mask area (`name_vertical`, `name_wide`, or `name_square`).
+  It uses a full-size canvas, not a crop of the project size.
+- **full source resolution** makes the canvas big enough that no video is scaled down.
+- Clips are mixed in YUV 4:2:0. This is fast and adds no color conversion.
 
 ## Slow motion and enhance (optional)
 
@@ -99,6 +112,19 @@ Select clips. Press **Smooth slow-mo**. Set the speed in percent or the new leng
 - Real-ESRGAN uses `realesr-general-x4v3` if present. Otherwise it uses `realesr-animevideov3` (made for anime).
 - Write a GPU number in `tools\gpu.txt` if the wrong GPU is used.
 - If the GPU runs out of memory, the editor tries again with one frame at a time.
+
+## Lyric layers
+
+Each layer has its own lines and style. All layers show at the same time.
+
+- Open **Lyrics**. Use **New layer** or **Duplicate layer** (also in the right-click menu of the lyrics row).
+- Pick a layer in the **layer** box. Type its lines. **Copy timing from layer 1** gives them the times of layer 1.
+- **linked with** links two layers. Their lines are paired. Select, move, trim, cut, delete, or duplicate a line, and its partner does the same.
+- Set the font, size, colors, and border for each layer. The default is yellow text with a black border.
+- The **frame** is the box for the text. Drag it in the preview, or set **x y w h**.
+  Long lines break to fit the width. A line that is too tall goes out of the frame.
+- **safe zone** keeps the frame clear of the buttons of video apps. The vertical zone also works in a horizontal project.
+- **Same size for all lines and layers** and **Safe zone to all layers** copy a setting to every layer.
 
 ## Align lyrics (optional)
 
