@@ -227,6 +227,7 @@ panel_randomize :: proc() {
 	im.SetNextItemWidth(90)
 	im.InputInt("max in a row (0 = any)", &o.max_run)
 	o.max_run = max(o.max_run, 0)
+	odds_list()
 
 	im.Separator()
 	names := make([dynamic]string, context.temp_allocator)
@@ -342,6 +343,23 @@ context_menu :: proc() {
 			im.Separator()
 		}
 		if im.MenuItem("Add line here") {lyric_add(&project, snap(ctx_time))}
+		im.Separator()
+		im.TextDisabled(cstr(fmt.tprintf("layer: %s", lyric_layer_name(project, lyr_layer))))
+		if im.MenuItem("Duplicate layer") {lyric_layer_duplicate(lyr_layer)}
+		if im.MenuItem("New layer") {lyric_layer_new()}
+		if lyric_layer_count(project) > 1 && im.BeginMenu("Link layer with") {
+			partner := int(lyric_style_of(project, lyr_layer).link_to) - 1
+			if im.MenuItem("nothing", nil, partner < 0) {lyric_layer_unlink(lyr_layer)}
+			for other in 0 ..< lyric_layer_count(project) {
+				if other != lyr_layer && im.MenuItem(cstr(fmt.tprintf("%s###mlk%d", lyric_layer_name(project, other), other)), nil, other == partner) {
+					set_status("layers linked: %d lines paired", lyric_layers_link(lyr_layer, other))
+				}
+			}
+			im.EndMenu()
+		}
+		if lyr_layer > 0 && im.MenuItem("Delete layer") {lyric_layer_delete(lyr_layer)}
+		if im.MenuItem("Layer style...") {show_lyrics = true}
+		im.Separator()
 		menu_action(.Lyrics_Open)
 		menu_action(.Lyrics_Export)
 	case .Part:

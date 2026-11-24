@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:sync"
 import "core:thread"
 
@@ -23,6 +24,9 @@ Proxy :: struct {
 	blocks:  [dynamic][]u8, // big bump-allocated blocks the frames live in; reader thread only, freed on reset
 	used:    int, // bytes used in the last block
 	fps:     int,
+	path:    string, // what to decode
+	started: bool, // the decoder was started (they start a few at a time, see proxy_pump)
+	done:    bool, // the decoder has finished (no more frames will come), guarded by mu
 	process: os.Process,
 	thread:  ^thread.Thread,
 }
@@ -58,22 +62,46 @@ preview_reset :: proc() {
 		}
 		delete(p.blocks)
 		delete(p.frames)
+		delete(p.path)
 		free(p)
 	}
 	clear(&proxies)
 	pv_shown_src, pv_shown_idx = -1, -1
 }
 
+// Decoders run a few at a time: all of them at once fight over the cores and the disk, and the one
+// that is needed first would finish last. proxy_start only queues; proxy_pump starts them.
+MAX_DECODERS :: 3
+
 proxy_start :: proc(path: string, fps: int) {
 	p := new(Proxy)
 	p.fps = fps
+	p.path = strings.clone(path)
 	append(&proxies, p)
+}
+
+// Call every frame: starts the next queued decoder if fewer than MAX_DECODERS run. `want` is the
+// source the preview needs now: it goes first.
+proxy_pump :: proc(want: int) {
+	running, next := 0, -1
+	for p, i in proxies {
+		if !p.started {
+			if next < 0 || i == want {next = i}
+			continue
+		}
+		sync.mutex_lock(&p.mu)
+		if !p.done {running += 1}
+		sync.mutex_unlock(&p.mu)
+	}
+	if next < 0 || running >= MAX_DECODERS {return}
+	p := proxies[next]
+	p.started = true
 
 	r, w, _ := os.pipe()
 	desc := os.Process_Desc {
 		command = {
-			"ffmpeg", "-v", "error", "-i", path, "-an",
-			"-vf", fmt.tprintf("fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease:force_divisible_by=2", fps, PROXY_MAX_W, PROXY_MAX_H),
+			"ffmpeg", "-v", "error", "-i", p.path, "-an",
+			"-vf", fmt.tprintf("fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease:force_divisible_by=2", p.fps, PROXY_MAX_W, PROXY_MAX_H),
 			"-pix_fmt", "yuvj420p", "-c:v", "mjpeg", "-q:v", "3", "-f", "image2pipe", "pipe:1",
 		},
 		stdout = w,
@@ -82,6 +110,7 @@ proxy_start :: proc(path: string, fps: int) {
 	os.close(w)
 	if err != nil {
 		os.close(r)
+		p.done = true
 		return
 	}
 	p.process = proc_
@@ -108,6 +137,11 @@ store_frame :: proc(p: ^Proxy, jpeg: []u8) -> []u8 {
 // Reads the pipe and splits the stream into jpeg frames (SOI ... EOI).
 proxy_reader :: proc(p: ^Proxy, r: ^os.File) {
 	defer os.close(r)
+	defer {
+		sync.mutex_lock(&p.mu)
+		p.done = true
+		sync.mutex_unlock(&p.mu)
+	}
 	chunk := make([]u8, 1 << 20)
 	defer delete(chunk)
 	pending: [dynamic]u8
@@ -143,7 +177,12 @@ preview_show :: proc(src: int, t: f64) {
 	}
 	p := proxies[src]
 	sync.mutex_lock(&p.mu)
-	idx := min(int(t * f64(p.fps)), len(p.frames) - 1)
+	idx := int(t * f64(p.fps))
+	if idx >= len(p.frames) {
+		// not decoded yet: keep what is shown rather than jumping to the newest decoded frame (that would
+		// play the whole video fast while a project loads). Past the end of a finished decode: the last frame.
+		idx = p.done ? len(p.frames) - 1 : -1
+	}
 	jpeg: []u8
 	if idx >= 0 {
 		jpeg = p.frames[idx]

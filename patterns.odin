@@ -21,10 +21,19 @@ import im "deps/odin-imgui"
 MAX_STEPS :: 64
 MAX_LANES :: 8
 
+// What a lane's hit does to the footage when Randomize fills the slots (Normal: a new piece of footage).
+Lane_Mode :: enum u8 {
+	Normal,
+	Repeat, // the slot plays the footage of the slot before it again (a stutter)
+	Freeze, // the slot holds the frame at its start until the next hit
+	Black,  // no clip: a black placeholder clip (the background stays around it)
+}
+
 Lane :: struct {
 	name:   [12]u8,
 	target: i8, // 0 = mark only, n > 0 = show video layer n, -1 = show all layers
 	mute:   bool,
+	mode:   Lane_Mode,
 	steps:  [MAX_STEPS]u8, // 0 = off, 1 = hit
 }
 
@@ -96,8 +105,8 @@ pattern_hits :: proc(p: Project, pat: Pattern, t0, t1: f64, anchor := f64(-1)) -
 	length := int(clamp(pat.length, 1, MAX_STEPS))
 	swing := f64(clamp(pat.swing, 0, 75)) / 100
 	out := make([dynamic]Hit, context.temp_allocator)
-	first := int(math.ceil((t0 - origin) / step - 1e-6))
-	k0 := int(math.ceil(((anchor >= 0 ? anchor : t0) - origin) / step - 1e-6)) // the step where the pattern starts over
+	first := pattern_step_from(t0, origin, step, swing)
+	k0 := pattern_step_from(anchor >= 0 ? anchor : t0, origin, step, swing) // the step where the pattern starts over
 	for n := 0; ; n += 1 {
 		k := first + n
 		t := origin + (f64(k) + (k % 2 != 0 ? swing : 0)) * step // swing delays the odd steps
@@ -117,26 +126,28 @@ pattern_hits :: proc(p: Project, pat: Pattern, t0, t1: f64, anchor := f64(-1)) -
 
 // Slicing times for Randomize from a pattern's hits in [t0, t1): the hit times, and per
 // slot the layer (track) of the hit's lane if it has one, else PIN_NONE.
-pattern_slots :: proc(p: Project, pat: Pattern, t0, t1: f64, times: ^[dynamic]f64, pins: ^[dynamic]int, anchor := f64(-1)) {
+pattern_slots :: proc(p: Project, pat: Pattern, t0, t1: f64, times: ^[dynamic]f64, pins: ^[dynamic]int, modes: ^[dynamic]Lane_Mode, anchor := f64(-1)) {
 	layers := video_layers(p)
 	for h in pattern_hits(p, pat, t0, t1, anchor) {
 		target := pat.lanes[h.lane].target
 		append(times, h.time)
 		append(pins, target > 0 && int(target) <= len(layers) ? layers[target - 1] : PIN_NONE)
+		append(modes, pat.lanes[h.lane].mode)
 	}
 }
 
 // The same for every part (each with its own pattern) inside [t0, t1). The gaps
 // between parts become PIN_SKIP slots.
-parts_slots :: proc(p: Project, t0, t1: f64, times: ^[dynamic]f64, pins: ^[dynamic]int) {
+parts_slots :: proc(p: Project, t0, t1: f64, times: ^[dynamic]f64, pins: ^[dynamic]int, modes: ^[dynamic]Lane_Mode) {
 	for part in p.parts {
 		if part.pattern < 0 || int(part.pattern) >= len(p.patterns) || part.t1 <= t0 || part.t0 >= t1 {continue}
 		a, b := max(part.t0, t0), min(part.t1, t1)
 		n := len(times)
-		pattern_slots(p, p.patterns[part.pattern], a, b, times, pins, part_anchor(part))
+		pattern_slots(p, p.patterns[part.pattern], a, b, times, pins, modes, part_anchor(part))
 		if len(times) > n {
 			append(times, b)
 			append(pins, PIN_SKIP)
+			append(modes, Lane_Mode.Normal)
 		}
 	}
 }
@@ -303,6 +314,8 @@ apply_pattern :: proc(idx := -1) {
 
 show_patterns: bool
 
+LANE_MODE_NAMES := [Lane_Mode]cstring{.Normal = "normal", .Repeat = "repeat", .Freeze = "freeze", .Black = "no clip"}
+
 target_label :: proc(target: i8) -> string {
 	switch {
 	case target == 0:  return "mark"
@@ -323,8 +336,29 @@ panel_patterns :: proc() {
 		append(&project.patterns, new_pattern(fmt.tprintf("pattern %d", len(project.patterns) + 1)))
 		project.settings.pattern_sel = i32(len(project.patterns) - 1)
 	}
+	im.SameLine()
+	if im.Button("Import") {
+		if path, ok := pick_file(false, "Import patterns", PATTERN_FILTER); ok {
+			if got, ok := import_patterns(path); ok {
+				first := len(project.patterns)
+				append(&project.patterns, ..got[:])
+				project.settings.pattern_sel = i32(first)
+				set_status("imported %d patterns", len(got))
+			} else {
+				set_status("no patterns in %s", path)
+			}
+		}
+	}
 	pat := cur_pattern()
 	if pat != nil {
+		im.SameLine()
+		if im.Button("Export") {
+			if path, ok := pick_file(true, "Export patterns (all, or just this one with shift)", PATTERN_FILTER, fmt.tprintf("%s%s", get_fixed(pat.name[:]), PATTERN_EXT), PATTERN_EXT); ok {
+				pats := im.GetIO().KeyShift ? project.patterns[project.settings.pattern_sel:][:1] : project.patterns[:]
+				set_status(export_patterns(pats, path) ? "exported %d patterns" : "could not export %d patterns", len(pats))
+			}
+		}
+		if im.IsItemHovered() {im.SetTooltip("all patterns; hold shift for only this one")}
 		im.SameLine()
 		if im.Button("Duplicate") {
 			copy_ := pat^
@@ -380,6 +414,7 @@ panel_patterns :: proc() {
 
 	// lanes: name, what a hit does, mute
 	im.Separator()
+	wave := pattern_wave_compute(pat^)
 	remove := -1
 	for li in 0 ..< int(pat.lane_count) {
 		lane := &pat.lanes[li]
@@ -398,9 +433,23 @@ panel_patterns :: proc() {
 			im.EndCombo()
 		}
 		im.SameLine()
+		im.SetNextItemWidth(72)
+		if im.BeginCombo(cstr(strings_cat(id, "k")), LANE_MODE_NAMES[lane.mode]) {
+			for m in Lane_Mode {
+				if im.Selectable(LANE_MODE_NAMES[m], m == lane.mode) {lane.mode = m}
+			}
+			im.EndCombo()
+		}
+		if im.IsItemHovered() {im.SetTooltip("what a hit does to the footage when Randomize fills the slots:\nnormal: new footage\nrepeat: plays the slot before it again\nfreeze: holds the frame at the hit until the next hit\nno clip: a black placeholder clip")}
+		im.SameLine()
 		im.Checkbox(cstr(strings_cat(id, "m")), &lane.mute)
 		im.SameLine()
 		if im.SmallButton(cstr(strings_cat("clear", id))) {lane.steps = {}}
+		if wave.ok {
+			im.SameLine()
+			if im.SmallButton(cstr(strings_cat("kick", id))) {set_status("%d kicks found in the audio", pattern_wave_detect(wave, lane))}
+			if im.IsItemHovered() {im.SetTooltip("fill this lane with the kicks (low end bumps) of the audio shown below")}
+		}
 		im.SameLine()
 		if im.SmallButton(cstr(strings_cat("x", id))) {remove = li}
 	}
@@ -422,6 +471,7 @@ panel_patterns :: proc() {
 	}
 	dl := im.GetWindowDrawList()
 	for bar := 0; bar < int(pat.length); bar += 16 {
+		pattern_wave_row(wave, pat^, bar, CELL)
 		for li in 0 ..< int(pat.lane_count) {
 			lane := &pat.lanes[li]
 			im.TextUnformatted(cstr(get_fixed(lane.name[:])))

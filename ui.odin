@@ -45,6 +45,7 @@ frame :: proc() {
 		}
 	}
 
+	proxy_pump(video_clip_at(project, playhead) >= 0 ? project.clips[video_clip_at(project, playhead)].source : -1) // decoders start a few at a time, the playhead's source first
 	audio_transport(playing, playhead)
 	audio_publish(project)
 
@@ -128,26 +129,38 @@ panel_preview :: proc() {
 	dl := im.GetWindowDrawList()
 	defer draw_lyric_preview(dl, a, b) // over the picture, also when there is none
 	defer draw_mask_bars(dl, a, cw / f32(s.width)) // over the picture, under the lyrics
-	im.DrawList_AddRectFilled(dl, a, b, im.ColorConvertFloat4ToU32({s.bg.r, s.bg.g, s.bg.b, 1})) // the background colour
 	ci := video_clip_at(project, playhead)
+	im.DrawList_AddRectFilled(dl, a, b, im.ColorConvertFloat4ToU32({s.bg.r, s.bg.g, s.bg.b, 1})) // the background colour
+	if s.mask_w > 0 && s.mask_h > 0 { // a mask: its area is its own colour (black) over the background
+		ax, ay, aw, ah := mask_rect(s)
+		pxs := cw / f32(s.width)
+		im.DrawList_AddRectFilled(dl, {a.x + f32(ax) * pxs, a.y + f32(ay) * pxs}, {a.x + f32(ax + aw) * pxs, a.y + f32(ay + ah) * pxs}, im.ColorConvertFloat4ToU32({s.mask_color.r, s.mask_color.g, s.mask_color.b, 1}))
+	}
 	if ci < 0 {
 		return
 	}
 	c := project.clips[ci]
-	preview_show(c.source, c.in_point + (playhead - c.start) * c.speed)
-	if pv_w <= 0 {
-		return
+	frame_w, frame_h := f32(pv_w), f32(pv_h)
+	if c.black { // a "no clip" placeholder: black in the shape of the clip it follows, the background stays around it
+		src := project.sources[c.source]
+		frame_w, frame_h = f32(max(src.width, 16)), f32(max(src.height, 9))
+	} else {
+		preview_show(c.source, c.freeze ? c.in_point : c.in_point + (playhead - c.start) * c.speed)
+		if pv_w <= 0 {
+			return
+		}
+		frame_w, frame_h = f32(pv_w), f32(pv_h)
 	}
 	// fit the frame into the canvas, then apply the clip transform (same math as export)
 	_, _, mkw, mkh := mask_rect(s)
 	mcw, mch := f32(mkw) * cw / f32(max(s.width &~ 1, 2)), f32(mkh) * ch / f32(max(s.height &~ 1, 2)) // the area the clips are shown in
-	kx := min(mcw / f32(pv_w), mch / f32(pv_h))
+	kx := min(mcw / frame_w, mch / frame_h)
 	ky := kx
 	#partial switch c.fit {
-	case .Fill:    kx = max(mcw / f32(pv_w), mch / f32(pv_h)); ky = kx
-	case .Stretch: kx, ky = mcw / f32(pv_w), mch / f32(pv_h)
+	case .Fill:    kx = max(mcw / frame_w, mch / frame_h); ky = kx
+	case .Stretch: kx, ky = mcw / frame_w, mch / frame_h
 	}
-	hw, hh := f32(pv_w) * kx * c.scale / 2, f32(pv_h) * ky * c.scale / 2
+	hw, hh := frame_w * kx * c.scale / 2, frame_h * ky * c.scale / 2
 	px := cw / f32(s.width) // canvas pixels -> screen pixels
 	center := im.Vec2{a.x + cw / 2 + c.pos.x * px, a.y + ch / 2 + c.pos.y * px}
 	sin_r, cos_r := math.sincos(c.rotation * math.PI / 180)
@@ -155,14 +168,18 @@ panel_preview :: proc() {
 		return {center.x + x * c - y * s, center.y + x * s + y * c}
 	}
 	im.DrawList_PushClipRect(dl, a, b, true)
-	im.DrawList_AddImageQuad(
-		dl,
-		{_TexID = im.TextureID(pv_texture)},
-		corner(center, -hw, -hh, sin_r, cos_r),
-		corner(center, hw, -hh, sin_r, cos_r),
-		corner(center, hw, hh, sin_r, cos_r),
-		corner(center, -hw, hh, sin_r, cos_r),
-		)
+	if c.black {
+		im.DrawList_AddQuadFilled(dl, corner(center, -hw, -hh, sin_r, cos_r), corner(center, hw, -hh, sin_r, cos_r), corner(center, hw, hh, sin_r, cos_r), corner(center, -hw, hh, sin_r, cos_r), 0xFF000000)
+	} else {
+		im.DrawList_AddImageQuad(
+			dl,
+			{_TexID = im.TextureID(pv_texture)},
+			corner(center, -hw, -hh, sin_r, cos_r),
+			corner(center, hw, -hh, sin_r, cos_r),
+			corner(center, hw, hh, sin_r, cos_r),
+			corner(center, -hw, hh, sin_r, cos_r),
+			)
+	}
 	im.DrawList_PopClipRect(dl)
 }
 
@@ -172,7 +189,7 @@ draw_mask_bars :: proc(dl: ^im.DrawList, a: im.Vec2, px: f32) {
 	mx, my, mw, mh := mask_rect(s)
 	W, H := int(s.width) &~ 1, int(s.height) &~ 1
 	if mw >= W && mh >= H {return}
-	col := im.ColorConvertFloat4ToU32({s.mask_color.r, s.mask_color.g, s.mask_color.b, 1})
+	col := im.ColorConvertFloat4ToU32({s.bg.r, s.bg.g, s.bg.b, 1}) // around the area: the background colour
 	bar :: proc(dl: ^im.DrawList, a: im.Vec2, px: f32, x, y, w, h: int, col: u32) {
 		if w > 0 && h > 0 {im.DrawList_AddRectFilled(dl, {a.x + f32(x) * px, a.y + f32(y) * px}, {a.x + f32(x + w) * px, a.y + f32(y + h) * px}, col)}
 	}
@@ -261,7 +278,7 @@ MASK_PRESETS := [?]struct {
 	{"wide 16:9", 16, 9},
 }
 
-// The mask: show the clips in a centered area of another ratio, with bars around it.
+// The mask: show the clips in a centered area of another ratio (its own colour, black), the background colour around it.
 mask_ui :: proc(s: ^Settings) {
 	current: cstring = "custom"
 	for m in MASK_PRESETS {
@@ -276,8 +293,24 @@ mask_ui :: proc(s: ^Settings) {
 	}
 	tip("Fake borders: the clips are shown only in a centered area of this ratio (a vertical video inside a horizontal project). The rest is a bar.")
 	if s.mask_w > 0 {
-		im.ColorEdit3("bars", &s.mask_color, {.NoInputs})
+		im.ColorEdit3("area", &s.mask_color, {.NoInputs})
+		tip("The colour of the mask area where no clip covers it (black). Around the area is the background colour.")
 	}
+}
+
+// What Export writes: the normal video and/or the mask area as a video of its own.
+export_options :: proc(s: ^Settings) {
+	has_mask := s.mask_w > 0 && s.mask_h > 0
+	normal := !(s.export_mask && has_mask && s.skip_normal)
+	if im.Checkbox("normal", &normal) {s.skip_normal = !normal}
+	tip("The whole picture: the clips in the mask area, the bars around it.")
+	im.SameLine()
+	im.BeginDisabled(!has_mask)
+	im.Checkbox("mask area only", &s.export_mask)
+	im.EndDisabled()
+	im.Checkbox("full source resolution", &s.native_res)
+	tip("Make the picture as big as needed so no video is scaled down (a 1080x1920 clip in a 1920x1080 project with a vertical mask gives a 3413x1920 canvas and a 1080x1920 vertical video). Bigger files and slower. Up to 4x, 7680 px.")
+	tip("Also a video of just the mask area (the vertical part of a vertical-in-horizontal project, or a wide mask in a vertical one), in full size, as name_vertical / _wide. Needs a mask (Project settings). Untick normal to write only that one.")
 }
 
 bg_popup_open: bool // set by the Background color command: the Program panel opens the picker
@@ -335,6 +368,7 @@ inspector_slices :: proc() {
 	im.SetNextItemWidth(-90)
 	im.InputInt("max in a row", &o.max_run)
 	o.max_run = max(o.max_run, 0)
+	odds_list()
 	if im.Button("Randomize") {do_action(.Randomize)}
 	tip("Make new slices. Locked slices stay, the others change.")
 	im.SameLine()
@@ -404,17 +438,21 @@ panel_inspector :: proc() {
 			}
 			im.EndCombo()
 		}
+		odds := vi >= 0 ? f32(clip_odds(c)) : 1
+		ch_odds := im.SliderFloat("randomize odds", &odds, 0.05, 5, "%.2fx", {.Logarithmic})
+		if im.IsItemHovered() {im.SetTooltip("how often Randomize picks this clip compared to the others (1 = equal, 0.2 = five times less often)")}
 		if im.Button("Reset transform") {
 			c.pos, c.scale, c.rotation, c.fit = {}, 1, 0, .Fit
 			ch_pos, ch_scale, ch_rot, ch_fit = true, true, true, true
 		}
-		if ch_pos || ch_scale || ch_rot || ch_fit {
+		if ch_pos || ch_scale || ch_rot || ch_fit || ch_odds {
 			for &k in project.clips {
 				if !inspector_hits(k, .Video) {continue}
 				if ch_pos {k.pos = c.pos}
 				if ch_scale {k.scale = c.scale}
 				if ch_rot {k.rotation = c.rotation}
 				if ch_fit {k.fit = c.fit}
+				if ch_odds {k.odds = abs(odds - 1) < 0.005 ? 0 : odds}
 			}
 		}
 	}	if ai >= 0 {
@@ -499,6 +537,7 @@ panel_project :: proc() {
 	if im.Button("Remove audio") {do_action(.Remove_Audio)}
 	im.SameLine()
 	if im.Button("Export...") {do_action(.Export)}
+	export_options(s)
 
 	// 2. tempo
 	im.SeparatorText("Tempo")

@@ -16,6 +16,7 @@ Source :: struct {
 	has_video: bool,
 	has_audio: bool,
 	width, height: int, // video size in pixels (0 = unknown)
+	size, mtime: i64, // the file's size and modified time when it was probed: if both are the same on load, the probe is skipped
 }
 
 // Fields are ordered by size (8-byte values, then 4, then 1) so the struct has no padding
@@ -36,11 +37,16 @@ Clip :: struct {
 	gain_db:  f32,    // audio clips: volume in dB (0 = unchanged, <= -60 = silent)
 	kind:     Clip_Kind,
 	fit:      Fit_Mode, // how the picture fills the canvas before scale / position
+	odds:     f32,  // how often Randomize picks this clip next to the others (0 = the normal 1)
+	black:    bool, // a "no clip" placeholder: plain black over the clip area (its source is not played)
+	freeze:   bool, // shows the one frame at in_point for the whole clip (a Freeze lane hit)
 	slice:    bool, // made by Randomize (or by the wheel): a piece of footage in a rhythm slot
 	locked:   bool, // a locked slice stays when you randomize again
 	selected: bool,
 }
 // How a video clip fills the output picture (before scale, position and rotation).
+clip_odds :: proc(c: Clip) -> f64 {return c.odds > 0 ? f64(c.odds) : 1}
+
 Fit_Mode :: enum u8 {
 	Fit,     // all of it, with the background where the shapes differ
 	Fill,    // the whole canvas, the edges that do not fit are cropped
@@ -99,17 +105,14 @@ Settings :: struct {
 	rand:          Rand_Options, // the Randomize command
 	bg:            [3]f32, // background colour of the picture (r, g, b: 0..1)
 	mask_w, mask_h: i32, // mask: the clips are shown in a centered area of this ratio (9:16 ...), bars around it. 0 = no mask
-	mask_color:    [3]f32, // the bars
+	mask_color:    [3]f32, // the colour of the mask area itself (black): what shows where no clip covers it. Around the area is the background colour
+	export_mask:   bool, // also export the mask area as a video of its own (9:16 -> a vertical video)
+	skip_normal:   bool, // ...and leave out the full-canvas export
+	native_res:    bool, // export big enough that no video source is scaled down (the canvas grows, same picture)
 	pattern_sel:   i32, // current cutting pattern
 	bpm_lo:        f32, // tempo detection only looks for tempos in this range
 	bpm_hi:        f32,
-	lyric_size:    f32, // lyrics: font height in % of the picture height
-	lyric_burn:    bool, // lyrics: show in the preview and burn into the export
-	lyric_mode:    Lyric_Mode, // lyrics: what is shown at a time
-	lyric_color:   [3]f32, // lyrics: text color
-	lyric_border:  [3]f32, // lyrics: border (outline) color
-	lyric_border_w: f32, // lyrics: border width in % of the font size
-	lyric_font:    [64]u8, // lyrics: font file name in C:\Windows\Fonts
+	lyric:         Lyric_Style, // the lyrics' first layer: font, size, colours, frame (more layers: Project.lyric_layers)
 }
 
 Grid_Type :: enum i32 {
@@ -154,6 +157,7 @@ Project :: struct {
 	patterns:    [dynamic]Pattern, // cutting patterns, see patterns.odin
 	parts:       [dynamic]Part, // time ranges with their own pattern
 	lyrics:      [dynamic]Lyric, // timed text lines, see lyrics.odin
+	lyric_layers: [dynamic]Lyric_Style, // more ways to show the same lines on top of the first (settings.lyric): a shadow, an outline...
 }
 
 Track_Flag :: enum u8 {
@@ -207,6 +211,7 @@ project_reset :: proc(p: ^Project) {
 	delete(p.patterns)
 	delete(p.parts)
 	delete(p.lyrics)
+	delete(p.lyric_layers)
 	p^ = {}
 	p.settings = {
 		fps    = 30,
@@ -221,15 +226,11 @@ project_reset :: proc(p: ^Project) {
 		bg = {0, 0, 0},
 		bpm_lo = 80,
 		bpm_hi = 180,
-		lyric_size = 6,
-		lyric_burn = true,
 		quality = .High,
-		lyric_color = {1, 1, 1},
-		lyric_border_w = 7,
 		rand = {footage = .Same_Time, slice = .Cuts, pattern = -1, max_run = 1, spread = true},
 	}
 	set_name(&p.settings, "untitled")
-	set_fixed(p.settings.lyric_font[:], "arial.ttf")
+	p.settings.lyric = default_lyric_style()
 }
 
 set_name :: proc(s: ^Settings, name: string) {
@@ -301,7 +302,7 @@ split_clip :: proc(p: ^Project, i: int, t: f64) -> int {
 	p.clips[i].duration = t - c.start
 	right := c
 	right.start = t
-	right.in_point = c.in_point + (t - c.start) * c.speed
+	if !c.freeze {right.in_point = c.in_point + (t - c.start) * c.speed} // a frozen frame stays the same frame
 	right.duration = c.duration - (t - c.start)
 	append(&p.clips, right)
 	return len(p.clips) - 1

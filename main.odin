@@ -107,7 +107,7 @@ do_action :: proc(a: Action) {
 	case .Redo:
 		if drag == .None {redo()}
 	case .Duplicate:
-		if sel_part >= 0 && sel_part < len(project.parts) {duplicate_part(sel_part)} else if any_selected() {duplicate_selected(&project)} else {duplicate_selected_tracks(&project)}
+		if lyrics_selected() > 0 {set_status("%d lyric line(s) duplicated", lyrics_duplicate_selected())} else if sel_part >= 0 && sel_part < len(project.parts) {duplicate_part(sel_part)} else if any_selected() {duplicate_selected(&project)} else {duplicate_selected_tracks(&project)}
 	case .Delete: // a part, a program cut, else clips, else layers
 		switch {
 		case lyrics_selected() > 0: // the selected lyric lines
@@ -192,7 +192,11 @@ do_action :: proc(a: Action) {
 	case .Lyrics_Open:
 		if path, ok := pick_file(false, "Open lyrics", "Lyrics|*.srt;*.lrc;*.txt|All files|*.*"); ok {
 			show_lyrics = true
-			set_status(lyrics_import(&project, path) ? "%d lyric lines" : "no lyrics found in %s", len(project.lyrics), path)
+			lyrics_park(lyr_layer) // into the layer the Lyrics window is on
+			got := lyrics_import(&project, path)
+			n := len(project.lyrics)
+			lyrics_unpark(lyr_layer)
+			set_status(got ? "%d lyric lines" : "no lyrics found in %s", n, path)
 		}
 	case .Lyrics_Transcribe:
 		show_lyrics = true
@@ -201,10 +205,13 @@ do_action :: proc(a: Action) {
 		show_lyrics = true
 		lyrics_align()
 	case .Lyrics_Export:
-		if len(project.lyrics) == 0 {
+		if lyric_layer_lines(project, lyr_layer) == 0 {
 			set_status("no lyrics to export")
-		} else if path, ok := pick_file(true, "Export lyrics", "SubRip|*.srt|LRC|*.lrc|ASS|*.ass|Text|*.txt", fmt.tprintf("%s.srt", settings_name(&project.settings))); ok {
-			set_status(lyrics_export(project, path) ? "exported %s" : "could not write %s", path)
+		} else if path, ok := pick_file(true, "Export lyrics (this layer)", "SubRip|*.srt|LRC|*.lrc|ASS|*.ass|Text|*.txt", fmt.tprintf("%s.srt", settings_name(&project.settings))); ok {
+			lyrics_park(lyr_layer)
+			wrote := lyrics_export(project, path)
+			lyrics_unpark(lyr_layer)
+			set_status(wrote ? "exported %s" : "could not write %s", path)
 		}
 	case .Lock:
 		// the selected clips, else the selected layers; all locked already -> unlock

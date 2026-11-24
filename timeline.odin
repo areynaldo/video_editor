@@ -15,7 +15,7 @@ PROG_Y :: RULER_H + PART_H
 PROG_H :: 26 // the program lane under the parts row
 LYR_Y :: PROG_Y + PROG_H // the lyrics row under the program lane
 LYR_H :: 16
-LANES_Y :: LYR_Y + LYR_H
+LANES_Y: f32 = LYR_Y + LYR_H // where the layers start: under one row of lyrics for every lyric layer (set every frame)
 EDGE_PX :: 6 // grab zone for trimming
 HEADER_W :: 124 // track header column, stays at the left while scrolling
 
@@ -57,6 +57,7 @@ loop_playback: bool // loop the selected program range while playing
 
 sel_part := -1 // selected part
 box_y0: f32 // screen y where a box selection started
+lyr_drag_layer: int // the lyrics row a box or a drag started in
 box_base: [dynamic]bool // what was selected before a ctrl box (clips or lyric lines)
 prev_scroll_y: f32 // the timeline's vertical scroll before the wheel acted on a slice
 part_drag_t: f64 // the free end of a part being dragged out
@@ -366,6 +367,7 @@ tools_column :: proc() {
 
 timeline :: proc() {
 	length := max(project_length(project) + 10, 30)
+	LANES_Y = LYR_Y + LYR_H * f32(lyric_layer_count(project))
 	size := im.Vec2{f32(length) * zoom, LANES_Y + track_h * f32(max(project.track_count, 4))}
 
 	im.BeginChild("timeline", {0, 0}, {.Borders}, {.HorizontalScrollbar, .NoNavInputs, .NoNavFocus}) // no keyboard nav: it would scroll the big canvas item into view
@@ -410,6 +412,15 @@ timeline :: proc() {
 	}
 	if canvas_hovered && mouse.y > p0.y + PROG_Y && mouse.y < p0.y + LYR_Y && cut_near(p0.x, mouse.x) >= 0 {
 		im.SetMouseCursor(.ResizeEW)
+	}
+	if canvas_hovered && mouse.y >= p0.y + LYR_Y && mouse.y < p0.y + LANES_Y { // a lyric line: the resize pointer on its edges (and with the razor)
+		layer := clamp(int((mouse.y - (p0.y + LYR_Y)) / LYR_H), 0, lyric_layer_count(project) - 1)
+		if i := lyric_hit(project, t_mouse, layer); i >= 0 {
+			l := project.lyrics[i]
+			if tool == .Razor || mouse.x < time_to_x(p0.x, l.t0) + EDGE_PX || mouse.x > time_to_x(p0.x, l.t1) - EDGE_PX {
+				im.SetMouseCursor(.ResizeEW)
+			}
+		}
 	}
 
 	// ctrl+wheel zooms, middle mouse pans (any tool)
@@ -469,7 +480,8 @@ timeline :: proc() {
 		case mouse.y < p0.y + LANES_Y: // lyrics row
 			clear_selection(&project)
 			clear_track_selection(&project)
-			if h := lyric_hit(project, t_mouse); h >= 0 {
+			lyr_layer = clamp(int((mouse.y - (p0.y + LYR_Y)) / LYR_H), 0, lyric_layer_count(project) - 1)
+			if h := lyric_hit(project, t_mouse, lyr_layer); h >= 0 {
 				if !project.lyrics[h].selected {lyrics_deselect(); lyric_select(h, false, false)}
 				sel_lyric = h
 			}
@@ -563,9 +575,14 @@ timeline :: proc() {
 			clear_selection(&project)
 			clear_track_selection(&project)
 			sel_cut, sel_cut2, sel_part = -1, -1, -1
-			if i := lyric_hit(project, t_mouse); i >= 0 {
+			layer := clamp(int((mouse.y - (p0.y + LYR_Y)) / LYR_H), 0, lyric_layer_count(project) - 1)
+			lyr_layer, lyr_drag_layer = layer, layer
+			if i := lyric_hit(project, t_mouse, layer); i >= 0 && tool == .Razor {
+				lyric_split(&project, i, snap(t_mouse)) // the razor cuts a line in two, the times follow
+				drag = .None
+			} else if i >= 0 {
 				lyric_select(i, io.KeyCtrl, io.KeyShift)
-				lyr_tap = i + 1
+				lyr_tap = lyric_rank(project, i) + 1
 				l := project.lyrics[i]
 				drag, drag_cut, drag_press_t, drag_ref = .Lyric_Move, i, t_mouse, l.t0
 				if io.KeyCtrl || io.KeyShift {
@@ -575,6 +592,8 @@ timeline :: proc() {
 				} else if mouse.x > time_to_x(p0.x, l.t1) - EDGE_PX {
 					drag, drag_ref = .Lyric_Trim_R, l.t1
 				}
+				clear(&lyr_base) // the lines as they were: Stretch scales from these
+				for x in project.lyrics {append(&lyr_base, [2]f64{x.t0, x.t1})}
 			} else { // empty space: drag a box to select lines
 				clear(&box_base)
 				for l in project.lyrics {append(&box_base, io.KeyCtrl && l.selected)}
@@ -671,16 +690,52 @@ timeline :: proc() {
 					}
 				}
 			case .Lyric_Move: // the whole selection moves with the line you hold
-				if drag_cut < len(project.lyrics) {lyrics_shift(target - project.lyrics[drag_cut].t0)}
+				if drag_cut < len(project.lyrics) {
+					lyrics_shift(target - project.lyrics[drag_cut].t0)
+					row := clamp(int((mouse.y - (p0.y + LYR_Y)) / LYR_H), 0, lyric_layer_count(project) - 1)
+					linked := false
+					for l in project.lyrics {linked ||= l.selected && l.link != 0}
+					if row != int(project.lyrics[drag_cut].layer) && !linked { // dragged onto another layer's row: the selected lines go there
+						for &l in project.lyrics {
+							if l.selected {l.layer = i32(row)}
+						}
+						lyr_layer, lyr_drag_layer = row, row
+					}
+				}
 			case .Lyric_Trim_L, .Lyric_Trim_R:
 				if drag_cut < len(project.lyrics) {
-					l := &project.lyrics[drag_cut]
-					if drag == .Lyric_Trim_L {l.t0 = clamp(target, 0, l.t1 - MIN_DURATION)} else {l.t1 = max(target, l.t0 + MIN_DURATION)}
+					any_sel := lyrics_selected() > 0
+					held_line := project.lyrics[drag_cut]
+					if held(.Stretch) && lyrics_selected() > 1 && len(lyr_base) == len(project.lyrics) {
+						// hold Stretch: the selected lines are scaled together (the other end of the selection stays), as a
+						// pattern is stretched: their gaps and lengths change by the same factor
+						first, last := max(f64), 0.0
+						for l, i in project.lyrics {
+							if l.selected {first, last = min(first, lyr_base[i][0]), max(last, lyr_base[i][1])}
+						}
+						anchor, old_edge := first, last
+						if drag == .Lyric_Trim_L {anchor, old_edge = last, first}
+						factor := max((target - anchor) / (old_edge - anchor), 0.05)
+						if old_edge == anchor {factor = 1}
+						for &l, i in project.lyrics {
+							if l.selected {
+								l.t0 = max(anchor + (lyr_base[i][0] - anchor) * factor, 0)
+								l.t1 = max(anchor + (lyr_base[i][1] - anchor) * factor, l.t0 + MIN_DURATION)
+							}
+						}
+					} else { // like clips: every selected line gets the same change of that edge
+						dx := target - (drag == .Lyric_Trim_L ? held_line.t0 : held_line.t1)
+						for &l, i in project.lyrics {
+							if !(any_sel ? l.selected : i == drag_cut) {continue}
+							if drag == .Lyric_Trim_L {l.t0 = clamp(l.t0 + dx, 0, l.t1 - MIN_DURATION)} else {l.t1 = max(l.t1 + dx, l.t0 + MIN_DURATION)}
+						}
+					}
 				}
 			case .Lyric_Box:
 				part_drag_t = t_mouse
 				lo, hi := min(drag_ref, part_drag_t), max(drag_ref, part_drag_t)
-				for &l, i in project.lyrics {l.selected = (i < len(box_base) && box_base[i]) || (l.t0 < hi && l.t1 > lo)}
+				for &l, i in project.lyrics {l.selected = (i < len(box_base) && box_base[i]) || (int(l.layer) == lyr_drag_layer && l.t0 < hi && l.t1 > lo)}
+					lyrics_select_linked()
 			case .Box: // a box over the lanes selects the clips it touches
 				part_drag_t = t_mouse
 				lo, hi := min(drag_ref, part_drag_t), max(drag_ref, part_drag_t)
@@ -818,17 +873,27 @@ timeline :: proc() {
 		}
 	}
 
-	// Lyrics row: subtitle lines. Drag to move, drag an edge to trim.
+	// Lyrics rows, one for every layer: subtitle lines. Drag to move (up or down to change layer), drag an edge to trim.
 	{
-		y0 := p0.y + LYR_Y
-		im.DrawList_AddRectFilled(dl, {p0.x, y0}, {p0.x + size.x, y0 + LYR_H - 1}, 0xFF1B1B1B)
+		LAYER_COLORS :: [4]u32{0xFF7A5A2A, 0xFF2A6A7A, 0xFF6A2A7A, 0xFF2A7A4A}
+		colors := LAYER_COLORS
+		for layer in 0 ..< lyric_layer_count(project) {
+			y0 := p0.y + LYR_Y + f32(layer) * LYR_H
+			im.DrawList_AddRectFilled(dl, {p0.x, y0}, {p0.x + size.x, y0 + LYR_H - 1}, layer == lyr_layer ? 0xFF262626 : 0xFF1B1B1B)
+		}
 		for i in 0 ..< len(project.lyrics) {
 			l := project.lyrics[i]
+			layer := min(int(l.layer), lyric_layer_count(project) - 1)
+			y0 := p0.y + LYR_Y + f32(layer) * LYR_H
 			a := im.Vec2{time_to_x(p0.x, l.t0), y0 + 1}
 			b := im.Vec2{time_to_x(p0.x, l.t1), y0 + LYR_H - 2}
 			if b.x < win_pos.x || a.x > win_pos.x + win_size.x {continue}
-			im.DrawList_AddRectFilled(dl, a, b, 0xFF7A5A2A)
+			im.DrawList_AddRectFilled(dl, a, b, colors[layer % len(colors)])
 			im.DrawList_AddRect(dl, a, b, l.selected || i == sel_lyric ? 0xFFFFFFFF : 0xFF000000, 0, l.selected ? 2 : 1)
+			if l.link != 0 { // linked lines: a bar of the group's colour on top
+				marks := [6]u32{0xFF40C0FF, 0xFF60E060, 0xFFFF70C0, 0xFFFFC040, 0xFF8080FF, 0xFF40E0D0}
+				im.DrawList_AddRectFilled(dl, a, {b.x, a.y + 3}, marks[int(l.link) % len(marks)])
+			}
 			text, _ := strings.replace_all(text_of(l), "\n", " / ", context.temp_allocator)
 			im.DrawList_PushClipRect(dl, a, b, true)
 			im.DrawList_AddText(dl, {a.x + 4, a.y}, 0xFFFFFFFF, cstr(text))
@@ -936,10 +1001,21 @@ draw_track_headers :: proc(dl: ^im.DrawList, p0: im.Vec2, sx, height: f32, rows:
 	im.DrawList_AddText(dl, {hl + 8, p0.y + sy + 3}, 0xFFFFFFFF, cstr(fmt.tprintf("%d fps", project.settings.fps)))
 	im.DrawList_AddText(dl, {hl + 8, p0.y + RULER_H + 1}, 0xFFB0B0B0, "Parts")
 	im.DrawList_AddText(dl, {hl + 8, p0.y + PROG_Y + 5}, 0xFFFFFFFF, "Program")
-	im.DrawList_AddText(dl, {hl + 8, p0.y + LYR_Y + 1}, 0xFFB0B0B0, "Lyrics")
+	for layer in 0 ..< lyric_layer_count(project) {
+		im.DrawList_AddText(dl, {hl + 8, p0.y + LYR_Y + f32(layer) * LYR_H + 1}, layer == lyr_layer ? 0xFFFFFFFF : 0xFFB0B0B0, cstr(lyric_layer_count(project) == 1 ? "Lyrics" : lyric_layer_name(project, layer)))
+	}
 
 	mouse := im.GetMousePos()
-	click := im.IsWindowHovered() && im.IsMouseClicked(.Left)
+	click := im.IsWindowHovered(im.HoveredFlags_AllowWhenBlockedByActiveItem) && im.IsMouseClicked(.Left)
+	for layer in 0 ..< lyric_layer_count(project) { // the lyric layers' names: click picks the layer, right-click its menu
+		ly := p0.y + LYR_Y + f32(layer) * LYR_H
+		if mouse.x < hl || mouse.x >= hr || mouse.y < ly || mouse.y >= ly + LYR_H {continue}
+		if click {lyr_layer = layer}
+		if im.IsWindowHovered(im.HoveredFlags_AllowWhenBlockedByActiveItem) && im.IsMouseClicked(.Right) {
+			lyr_layer = layer
+			open_context(.Lyric, 0, -1)
+		}
+	} // the canvas button under the header is already active on this press
 	for r in 0 ..< rows {
 		y := p0.y + LANES_Y + f32(r) * track_h
 		track := project.track_count - 1 - r
@@ -1003,7 +1079,7 @@ draw_track_headers :: proc(dl: ^im.DrawList, p0: im.Vec2, sx, height: f32, rows:
 			select_track(track, im.GetIO().KeyCtrl, im.GetIO().KeyShift)
 		}
 		// right-click: keep a multi-selection if the layer is in it, then open the layer menu
-		if im.IsWindowHovered() && im.IsMouseClicked(.Right) && mouse.x >= hl && mouse.x < hr && mouse.y >= y && mouse.y < y + track_h {
+		if im.IsWindowHovered(im.HoveredFlags_AllowWhenBlockedByActiveItem) && im.IsMouseClicked(.Right) && mouse.x >= hl && mouse.x < hr && mouse.y >= y && mouse.y < y + track_h {
 			if !track_has(project, track, .Selected) {
 				select_track(track, false, false)
 			}
