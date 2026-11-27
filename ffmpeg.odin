@@ -6,6 +6,8 @@ import "core:os"
 import "core:strconv"
 import "core:slice"
 import "core:strings"
+import "core:sync"
+import "core:thread"
 
 // All ffmpeg interaction goes through the CLI. ffmpeg/ffprobe must be on PATH.
 
@@ -289,7 +291,7 @@ export_pass :: proc(p: Project, out_path: string, length: f64, want_video, want_
 	}
 	append(&args, "-t", fmt.tprintf("%.3f", length))
 	if want_video {append(&args, "-pix_fmt", "yuv420p")}
-	append(&args, ..quality_args(p.settings.format, p.settings.quality, want_video, acount > 0, W * H))
+	append(&args, ..quality_args(p.settings.format, p.settings.quality, want_video, acount > 0, W * H, use_gpu_encode(p.settings, W, H)))
 	append(&args, out_path)
 
 	// runs as a background job: the bar follows ffmpeg's own progress report
@@ -556,7 +558,30 @@ export_finish :: proc(data: rawptr) {
 // Codec settings for the export. Without them ffmpeg uses its defaults (x264 crf 23, aac 128k), which
 // is what makes an export look compressed. x264: constant quality (crf: lower = better), slow preset.
 // WebM cannot hold x264: VP9 + Opus.
-quality_args :: proc(format: Export_Format, q: Export_Quality, video := true, audio := true, pixels := 0) -> []string {
+// Is the graphics card's H.264 encoder (NVENC) there? Asked once, on a thread (starting it takes a second).
+// 0 = not asked, 1 = asking, 2 = yes, 3 = no.
+nvenc_state: i32
+
+nvenc_ready :: proc() -> bool {
+	if sync.atomic_load(&nvenc_state) == 0 {
+		sync.atomic_store(&nvenc_state, 1)
+		thread.run(proc() {
+			state, _, _, err := os.process_exec(
+				{command = {"ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.2", "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"}},
+				context.allocator,
+				)
+			sync.atomic_store(&nvenc_state, err == nil && state.exit_code == 0 ? 2 : 3)
+		})
+	}
+	return sync.atomic_load(&nvenc_state) == 2
+}
+
+// Can this export use the graphics card? NVENC makes H.264 (mp4, mkv, mov) up to 4096 px.
+use_gpu_encode :: proc(s: Settings, w, h: int) -> bool {
+	return s.gpu_encode && s.format != .WebM && w <= 4096 && h <= 4096 && nvenc_ready()
+}
+
+quality_args :: proc(format: Export_Format, q: Export_Quality, video := true, audio := true, pixels := 0, gpu := false) -> []string {
 	crf := [Export_Quality]string{.Typical = "19", .High = "16", .Max = "12"}
 	vp9 := [Export_Quality]string{.Typical = "32", .High = "24", .Max = "17"}
 	rate := [Export_Quality]string{.Typical = "192k", .High = "256k", .Max = "320k"}
@@ -566,8 +591,11 @@ quality_args :: proc(format: Export_Format, q: Export_Quality, video := true, au
 		if audio {append(&out, "-c:a", "libopus", "-b:a", rate[q])}
 		return out[:]
 	}
-	if video {append(&out, "-c:v", "libx264", "-crf", crf[q], "-preset", q == .Max ? "slow" : "medium")}
-	if video && pixels >= BIG_CANVAS_PIXELS { // big pictures: x264 keeps every thread's frames and the look-ahead in memory (3.2 GB for 1920x3412)
+	if video && gpu {
+		cq := [Export_Quality]string{.Typical = "27", .High = "24", .Max = "20"} // constant quality: lower = better. About crf + 8 matches x264 in quality (measured), at roughly 20 % more size
+		append(&out, "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", cq[q], "-b:v", "0", "-spatial-aq", "1", "-temporal-aq", "1")
+	} else if video {append(&out, "-c:v", "libx264", "-crf", crf[q], "-preset", q == .Max ? "slow" : "medium")}
+	if video && !gpu && pixels >= BIG_CANVAS_PIXELS { // big pictures: x264 keeps every thread's frames and the look-ahead in memory (3.2 GB for 1920x3412)
 		append(&out, "-threads", "12", "-x264-params", "rc-lookahead=20")
 	}
 	if audio {append(&out, "-c:a", "aac", "-b:a", rate[q])}

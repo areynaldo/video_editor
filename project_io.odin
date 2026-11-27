@@ -18,7 +18,7 @@ save_project :: proc(p: Project, path: string) -> bool {
 	s := p.settings
 	fmt.sbprintf(&b, "[project]\nname = %s\nfps = %d\nwidth = %d\nheight = %d\nformat = %s\nquality = %d\n", settings_name(&p.settings), s.fps, s.width, s.height, FORMAT_EXT[s.format], int(s.quality))
 	fmt.sbprintf(&b, "grid = %d\ngrid_type = %d\nbpm = %.9g\ngrid_div = %d\n", s.grid_on ? 1 : 0, int(s.grid_type), s.bpm, s.grid_div)
-	fmt.sbprintf(&b, "cut_every = %d\nmaster = %.2f\ngrid_offset = %.9g\nrand_footage = %d\nrand_use_all = %d\nrand_spread = %d\nrand_slice = %d\nrand_pattern = %d\nrand_max_run = %d\nbg = %02x%02x%02x\nmask_w = %d\nmask_h = %d\nmask_color = %02x%02x%02x\nexport_mask = %d\nskip_normal = %d\nnative_res = %d\n",s.cut_every, s.master_db, s.grid_offset, int(s.rand.footage), s.rand.use_all ? 1 : 0, s.rand.spread ? 1 : 0, int(s.rand.slice), s.rand.pattern, s.rand.max_run, int(s.bg.r * 255 + 0.5), int(s.bg.g * 255 + 0.5), int(s.bg.b * 255 + 0.5), s.mask_w, s.mask_h, int(s.mask_color.r * 255 + 0.5), int(s.mask_color.g * 255 + 0.5), int(s.mask_color.b * 255 + 0.5), s.export_mask ? 1 : 0, s.skip_normal ? 1 : 0, s.native_res ? 1 : 0)
+	fmt.sbprintf(&b, "cut_every = %d\nmaster = %.2f\ngrid_offset = %.9g\nrand_footage = %d\nrand_use_all = %d\nrand_spread = %d\nrand_slice = %d\nrand_pattern = %d\nrand_max_run = %d\nbg = %02x%02x%02x\nmask_w = %d\nmask_h = %d\nmask_color = %02x%02x%02x\nexport_mask = %d\nskip_normal = %d\nnative_res = %d\ngpu_encode = %d\n",s.cut_every, s.master_db, s.grid_offset, int(s.rand.footage), s.rand.use_all ? 1 : 0, s.rand.spread ? 1 : 0, int(s.rand.slice), s.rand.pattern, s.rand.max_run, int(s.bg.r * 255 + 0.5), int(s.bg.g * 255 + 0.5), int(s.bg.b * 255 + 0.5), s.mask_w, s.mask_h, int(s.mask_color.r * 255 + 0.5), int(s.mask_color.g * 255 + 0.5), int(s.mask_color.b * 255 + 0.5), s.export_mask ? 1 : 0, s.skip_normal ? 1 : 0, s.native_res ? 1 : 0, s.gpu_encode ? 1 : 0)
 	fmt.sbprintf(&b, "pattern_sel = %d\nbpm_lo = %.0f\nbpm_hi = %.0f\n", s.pattern_sel, s.bpm_lo, s.bpm_hi)
 	for pat in p.patterns {
 		write_pattern(&b, pat)
@@ -274,6 +274,7 @@ load_project :: proc(p: ^Project, path: string) -> (err: string) {
 			case "export_mask": p.settings.export_mask = n != 0
 			case "skip_normal": p.settings.skip_normal = n != 0
 			case "native_res":  p.settings.native_res = n != 0
+			case "gpu_encode":  p.settings.gpu_encode = n != 0
 			case "mask_color":
 				if v, ok := strconv.parse_int(val, 16); ok {
 					p.settings.mask_color = {f32((v >> 16) & 255) / 255, f32((v >> 8) & 255) / 255, f32(v & 255) / 255}

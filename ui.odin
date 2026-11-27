@@ -1,5 +1,6 @@
 package main
 
+import "base:intrinsics"
 import "core:fmt"
 import "core:math"
 import "core:strings"
@@ -298,6 +299,12 @@ mask_ui :: proc(s: ^Settings) {
 	}
 }
 
+// The graphics card's encoder was asked about and is not there.
+sync_nvenc_unavailable :: proc() -> bool {
+	nvenc_ready() // starts the question the first time
+	return intrinsics.atomic_load(&nvenc_state) == 3
+}
+
 // What Export writes: the normal video and/or the mask area as a video of its own.
 export_options :: proc(s: ^Settings) {
 	has_mask := s.mask_w > 0 && s.mask_h > 0
@@ -308,6 +315,10 @@ export_options :: proc(s: ^Settings) {
 	im.BeginDisabled(!has_mask)
 	im.Checkbox("mask area only", &s.export_mask)
 	im.EndDisabled()
+	im.BeginDisabled(sync_nvenc_unavailable())
+	im.Checkbox("GPU encode (NVENC)", &s.gpu_encode)
+	im.EndDisabled()
+	tip("Encodes with the graphics card: much faster and it needs little memory. The files are bigger than x264 at the same quality. It works for mp4, mkv and mov up to 4096 px. WebM, or a bigger picture, uses the processor. Greyed out when no NVIDIA encoder is found.")
 	im.Checkbox("full source resolution", &s.native_res)
 	if s.native_res {
 		k := native_scale(project)

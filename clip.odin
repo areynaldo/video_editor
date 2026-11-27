@@ -108,6 +108,7 @@ Settings :: struct {
 	mask_color:    [3]f32, // the colour of the mask area itself (black): what shows where no clip covers it. Around the area is the background colour
 	export_mask:   bool, // also export the mask area as a video of its own (9:16 -> a vertical video)
 	skip_normal:   bool, // ...and leave out the full-canvas export
+	gpu_encode:    bool, // encode with the graphics card (NVENC): much faster, bigger files (H.264 up to 4096 px; not WebM)
 	native_res:    bool, // export big enough that no video source is scaled down (the canvas grows, same picture)
 	pattern_sel:   i32, // current cutting pattern
 	bpm_lo:        f32, // tempo detection only looks for tempos in this range
