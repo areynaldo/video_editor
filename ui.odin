@@ -309,6 +309,12 @@ export_options :: proc(s: ^Settings) {
 	im.Checkbox("mask area only", &s.export_mask)
 	im.EndDisabled()
 	im.Checkbox("full source resolution", &s.native_res)
+	if s.native_res {
+		k := native_scale(project)
+		im.SameLine()
+		w, h := int(f64(s.width) * k) &~ 1, int(f64(s.height) * k) &~ 1
+		im.TextDisabled(cstr(k > 1.0001 ? fmt.tprintf("-> %dx%d", w, h) : "-> the project size"))
+	}
 	tip("Make the picture as big as needed so no video is scaled down (a 1080x1920 clip in a 1920x1080 project with a vertical mask gives a 3413x1920 canvas and a 1080x1920 vertical video). Bigger files and slower. Up to 4x, 7680 px.")
 	tip("Also a video of just the mask area (the vertical part of a vertical-in-horizontal project, or a wide mask in a vertical one), in full size, as name_vertical / _wide. Needs a mask (Project settings). Untick normal to write only that one.")
 }

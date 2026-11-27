@@ -289,7 +289,7 @@ export_pass :: proc(p: Project, out_path: string, length: f64, want_video, want_
 	}
 	append(&args, "-t", fmt.tprintf("%.3f", length))
 	if want_video {append(&args, "-pix_fmt", "yuv420p")}
-	append(&args, ..quality_args(p.settings.format, p.settings.quality, want_video, acount > 0))
+	append(&args, ..quality_args(p.settings.format, p.settings.quality, want_video, acount > 0, W * H))
 	append(&args, out_path)
 
 	// runs as a background job: the bar follows ffmpeg's own progress report
@@ -422,6 +422,8 @@ export :: proc(p: Project, out_path: string, from := f32(0), to := f32(1)) -> (o
 
 MAX_NATIVE_SCALE :: 4.0
 MAX_CANVAS :: 7680
+MAX_NATIVE_PIXELS :: 4_200_000 // "full source resolution" does not grow the canvas past this (x264 needs about 1.5 GB for every 1.4 Mpx at the default settings)
+BIG_CANVAS_PIXELS :: 3_500_000 // from here x264 gets lighter settings (less memory, the same speed)
 
 // How much bigger the canvas must be for every video clip to play at its source's size or more: a clip is fitted
 // into the mask area (or the canvas), then scaled by its own scale, so a 1080x1920 clip in a 608x1080 mask area
@@ -437,6 +439,7 @@ native_scale :: proc(p: Project) -> f64 {
 		k = max(k, fit * f64(max(c.scale, 1)))
 	}
 	k = min(k, MAX_NATIVE_SCALE, f64(MAX_CANVAS) / f64(max(p.settings.width, p.settings.height)))
+	k = min(k, math.sqrt(f64(MAX_NATIVE_PIXELS) / f64(max(p.settings.width, 1) * max(p.settings.height, 1)))) // a canvas already bigger than the budget does not grow
 	return max(k, 1)
 }
 
@@ -542,14 +545,18 @@ export_finish :: proc(data: rawptr) {
 	case "stopped": set_status("export stopped")
 	case:
 		set_status("export failed: %s", d.path)
-		job_report("The export did not finish", d.err)
+		hint := ""
+		if strings.contains(d.err, "malloc") || strings.contains(d.err, "memory") {
+			hint = "\n\nThe computer ran out of memory. Close other programs, and turn off 'full source resolution' (it makes the picture bigger than the project size) or use a lower quality."
+		}
+		job_report("The export did not finish", strings.concatenate({d.err, hint}, context.temp_allocator))
 	}
 }
 
 // Codec settings for the export. Without them ffmpeg uses its defaults (x264 crf 23, aac 128k), which
 // is what makes an export look compressed. x264: constant quality (crf: lower = better), slow preset.
 // WebM cannot hold x264: VP9 + Opus.
-quality_args :: proc(format: Export_Format, q: Export_Quality, video := true, audio := true) -> []string {
+quality_args :: proc(format: Export_Format, q: Export_Quality, video := true, audio := true, pixels := 0) -> []string {
 	crf := [Export_Quality]string{.Typical = "19", .High = "16", .Max = "12"}
 	vp9 := [Export_Quality]string{.Typical = "32", .High = "24", .Max = "17"}
 	rate := [Export_Quality]string{.Typical = "192k", .High = "256k", .Max = "320k"}
@@ -560,6 +567,9 @@ quality_args :: proc(format: Export_Format, q: Export_Quality, video := true, au
 		return out[:]
 	}
 	if video {append(&out, "-c:v", "libx264", "-crf", crf[q], "-preset", q == .Max ? "slow" : "medium")}
+	if video && pixels >= BIG_CANVAS_PIXELS { // big pictures: x264 keeps every thread's frames and the look-ahead in memory (3.2 GB for 1920x3412)
+		append(&out, "-threads", "12", "-x264-params", "rc-lookahead=20")
+	}
 	if audio {append(&out, "-c:a", "aac", "-b:a", rate[q])}
 	if video && (format == .MP4 || format == .MOV) {append(&out, "-movflags", "+faststart")}
 	return out[:]
